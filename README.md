@@ -1,1 +1,226 @@
-# extract-tiles
+# Extract-Tiles System
+
+A multi-resolution tiling system for visualizing large triangulated mesh surfaces from CFD simulations. This implementation follows the concepts from Graham Pullan's AIAA paper on visualization of aerospace simulations using a navigation approach.
+
+## Features
+
+- **Multi-resolution tiles**: Automatically generates LOD tiles from GLB files
+- **Multiple tiling modes**:
+  - UV-Quadtree: For meshes with texture coordinates
+  - World-Space Octree: For meshes without UVs (e.g., isosurfaces)
+- **Crack prevention**: Includes overlap margins and optional skirt generation
+- **Dynamic LOD**: SSE-based (screen-space error) refinement
+- **Efficient streaming**: Fastify server with compression and caching
+- **Interactive viewers**:
+  - Single-extract viewer with dat.GUI controls for dataset/time selection, LOD tuning, wireframe, and bounding-box diagnostics
+  - Multi-extract viewer for comparing multiple datasets
+
+## Installation
+
+### Prerequisites
+
+- Python 3.8+
+- Node.js 16+
+- npm
+
+### Setup
+
+1. **Install Python dependencies:**
+```bash
+pip install -r requirements.txt
+```
+
+2. **Install Node.js dependencies:**
+```bash
+npm install
+```
+
+## Usage
+
+### 1. Generate Tiles
+
+Use the Python preprocessor to generate multi-resolution tiles from your GLB files:
+
+#### UV-Quadtree mode (requires TEXCOORD_0):
+```bash
+python3 build_tiles.py \
+  --in_glb path/to/mesh.glb \
+  --out_dir tiles_out \
+  --extract myextract \
+  --time 0 \
+  --tiling_space uv \
+  --max_depth 5 \
+  --target_kb 200
+```
+
+#### World-Space Octree mode (no UVs required):
+```bash
+python3 build_tiles.py \
+  --in_glb path/to/isosurface.glb \
+  --out_dir tiles_out \
+  --extract isosurface \
+  --time 0 \
+  --tiling_space world \
+  --max_depth 5 \
+  --target_kb 200
+```
+
+### Parameters:
+- `--in_glb`: Input GLB file path
+- `--out_dir`: Output directory for tiles (default: tiles_out)
+- `--extract`: Extract name (used for organizing multiple datasets)
+- `--time`: Time index for unsteady simulations (default: 0)
+- `--tiling_space`: Either 'uv' or 'world'
+- `--max_depth`: Maximum tile depth/zoom level (default: 5)
+- `--target_kb`: Target tile size in KB (default: 200)
+
+### 2. Start the Server
+
+```bash
+npm start
+# or for development with auto-reload:
+npm run dev
+```
+
+The server will start on http://localhost:8080
+
+### 3. View the Tiles
+
+- **Single-extract viewer**: http://localhost:8080/
+  - dat.GUI panel (top-right) lets you pick extract/time, adjust SSE thresholds, toggle wireframe, and overlay per-tile bounding boxes
+- **Multi-extract viewer**: http://localhost:8080/multi_index.html
+
+## Directory Structure
+
+```
+extract-tiles/
+├── build_tiles.py          # Python preprocessor
+├── server.mjs              # Fastify tile server
+├── package.json
+├── requirements.txt
+├── public/
+│   ├── index.html          # Single-extract viewer
+│   ├── viewer.js
+│   ├── multi_index.html   # Multi-extract viewer
+│   └── multi_viewer.js
+└── tiles_out/              # Generated tiles (created by preprocessor)
+    └── <extract>/
+        ├── manifest_<time>.json
+        └── <time>/
+            └── z/x/y.glb   # Tile files
+```
+
+## Manifest Format
+
+Each extract generates a manifest JSON file with metadata:
+
+```json
+{
+  "extract": "name",
+  "time": 0,
+  "source": "input.glb",
+  "tilingSpace": "uv",
+  "grid": "quadtree",
+  "maxDepth": 5,
+  "targetTileBytes": 204800,
+  "global": {
+    "triCount": 999999,
+    "avgTriArea": 0.0003,
+    "minTriArea": 1.1e-7
+  },
+  "tiles": [...]
+}
+```
+
+## Tile Metadata
+
+Each GLB tile includes metadata in `mesh.extras`:
+
+```json
+{
+  "tileId": "z/x/y",
+  "z": 3, "x": 5, "y": 6,
+  "parent": "2/2/3",
+  "children": ["4/10/12", "4/11/12", "4/10/13", "4/11/13"],
+  "aabbWorld": [[xmin,ymin,zmin], [xmax,ymax,zmax]],
+  "aabbUV": [[u0,v0], [u1,v1]],
+  "triCount": 1234,
+  "geometricError": 0.002,
+  "approxBytes": 204800,
+  "time": 0
+}
+```
+
+## Viewer Controls
+
+- **Orbit**: Left mouse drag
+- **Zoom**: Scroll wheel or right mouse drag
+- **Pan**: Middle mouse drag
+- **dat.GUI panel**:
+  - **Extract / Time**: Switch between datasets and time indices
+  - **SSE Refine / Coarsen**: Set screen-space error thresholds (0.5–30 px refine, 0.25–15 px coarsen)
+  - **Wireframe**: Toggle mesh rendering between solid and wireframe
+  - **Bounding Boxes**: Overlay each tile's world-space bounding box while keeping the surface visible
+
+## Performance Tuning
+
+### Tile Size
+- Adjust `--target_kb` to balance between tile count and download size
+- Typical values: 50-500 KB per tile
+
+### LOD Depth
+- `--max_depth` controls maximum refinement level
+- Higher values = more detail but more tiles
+- Typical values: 4-7
+
+### SSE Thresholds
+- **Refine threshold**: Pixels of error before loading finer tiles (default: 3.0)
+- **Coarsen threshold**: Hysteresis to prevent LOD thrashing (default: 1.5)
+
+### Cache Settings
+- Adjust `MAX_TILES` in viewer.js for memory usage
+- Default: 200 tiles for single viewer, 400 for multi
+
+## API Endpoints
+
+- `GET /tiles/*` - Serve tile GLB files
+- `GET /manifest/:extract/:time.json` - Get manifest for an extract
+- `GET /api/extracts` - List available extracts and time steps
+
+## Testing
+
+Create a sample GLB file with UV coordinates and test the system:
+
+```bash
+# Generate tiles
+python3 build_tiles.py --in_glb sample.glb --tiling_space uv
+
+# Start server
+npm start
+
+# Open browser to http://localhost:8080
+```
+
+## Troubleshooting
+
+### "UV mode requires TEXCOORD_0" error
+- Your GLB file doesn't have UV coordinates
+- Use `--tiling_space world` instead
+
+### Tiles not loading
+- Check browser console for errors
+- Ensure server is running
+- Verify manifest path is correct
+
+### Poor performance
+- Reduce `--max_depth` for fewer tiles
+- Increase `--target_kb` for larger tiles
+- Adjust SSE thresholds in viewer
+
+## License
+
+MIT
+
+## Credits
+
+Based on concepts from "Visualisation of aerospace simulations - a navigation approach" by Graham Pullan, AIAA 2026.

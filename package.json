@@ -1,0 +1,21 @@
+{
+  "name": "extract-tiles",
+  "version": "1.0.0",
+  "description": "Multi-resolution extract-tiling system for triangulated mesh surfaces",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  },
+  "keywords": ["visualization", "3d", "tiles", "glTF", "CFD"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "fastify": "^4.25.2",
+    "@fastify/cors": "^8.5.0",
+    "@fastify/compress": "^6.5.0",
+    "@fastify/static": "^6.12.0"
+  },
+  "devDependencies": {}
+}

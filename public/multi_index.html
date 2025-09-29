@@ -1,0 +1,107 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Multi-Extract Viewer</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    html, body, #app {
+      height: 100%;
+      margin: 0;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    #hud {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.5);
+      color: #fff;
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    #controls {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: rgba(0, 0, 0, 0.5);
+      color: #fff;
+      padding: 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      width: 250px;
+    }
+    #extractList {
+      max-height: 200px;
+      overflow-y: auto;
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 3px;
+      margin: 10px 0;
+      padding: 5px;
+    }
+    .extract-item {
+      display: flex;
+      align-items: center;
+      padding: 3px;
+    }
+    .extract-item input {
+      margin-right: 5px;
+    }
+    .extract-item select {
+      margin-left: auto;
+      width: 80px;
+      font-size: 11px;
+    }
+    #controls input[type="range"] {
+      width: 100%;
+      margin: 5px 0;
+    }
+    #loading {
+      position: fixed;
+      bottom: 10px;
+      right: 10px;
+      background: rgba(0, 100, 200, 0.8);
+      color: #fff;
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 11px;
+      display: none;
+    }
+    #loading.active {
+      display: block;
+    }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/examples/jsm/controls/OrbitControls.js": "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js",
+      "three/examples/jsm/loaders/GLTFLoader.js": "https://unpkg.com/three@0.160.0/examples/jsm/loaders/GLTFLoader.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="hud">
+    Tiles: <span id="tiles">0</span> |
+    Reqs: <span id="reqs">0</span> |
+    Cache: <span id="cache">0</span>
+  </div>
+  <div id="controls">
+    <h4 style="margin: 5px 0;">Multi-Extract Viewer</h4>
+    <div id="extractList">Loading...</div>
+    <div>
+      <label>SSE Refine: <input type="range" id="sseRefine" min="1" max="10" step="0.5" value="3"></label>
+      <span id="sseRefineValue">3.0</span>
+    </div>
+    <div>
+      <label>SSE Coarsen: <input type="range" id="sseCoarsen" min="0.5" max="5" step="0.5" value="1.5"></label>
+      <span id="sseCoarsenValue">1.5</span>
+    </div>
+    <button id="clearAll" style="width: 100%; margin-top: 10px;">Clear All</button>
+  </div>
+  <div id="loading">Loading tiles...</div>
+  <script type="module" src="./multi_viewer.js"></script>
+</body>
+</html>
