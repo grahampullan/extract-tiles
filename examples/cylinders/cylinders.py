@@ -39,6 +39,9 @@ def make_cylinder_mesh(
     segments_axis: int,
     segments_circ: int,
     color_rgba: Tuple[int, int, int, int],
+    waviness: float = 0.0,
+    wave_phase: float = 0.0,
+    wave_cycles: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return (positions, indices, uvs, colors) for a single open cylinder."""
     axis_vec = axis_end - axis_start
@@ -73,9 +76,13 @@ def make_cylinder_mesh(
 
     for v in v_vals:
         center = axis_start + tangent * (v * length)
+        local_radius = radius
+        if waviness != 0.0 and wave_cycles != 0.0:
+            local_radius = radius * (1.0 + waviness * math.sin(2.0 * math.pi * wave_cycles * v + wave_phase))
+            local_radius = max(local_radius, 1e-6)
         for u in u_vals:
             theta = u * 2.0 * math.pi
-            offset = radius * (math.cos(theta) * normal + math.sin(theta) * binormal)
+            offset = local_radius * (math.cos(theta) * normal + math.sin(theta) * binormal)
             verts.append(center + offset)
             uvs.append([u % 1.0, v])  # wrap u in [0,1)
             colors.append(color_rgba)
@@ -211,6 +218,9 @@ def build_spoke_wheels(
     tube_radius: float,
     segments_axis: int,
     segments_circ: int,
+    wave_amplitude: float,
+    wave_cycles_min: float,
+    wave_cycles_max: float,
 ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     if spokes < 1:
         raise ValueError("spokes must be >= 1")
@@ -240,7 +250,26 @@ def build_spoke_wheels(
             start = dir_xy * r_hub + np.array([0.0, 0.0, z_off], dtype=np.float64)
             end = dir_xy * r_tip + np.array([0.0, 0.0, z_off], dtype=np.float64)
             color = hue_to_rgba((s / max(1, spokes)) + 0.17 * w)
-            mesh = make_cylinder_mesh(start, end, tube_radius, segments_axis, segments_circ, color)
+            if wave_amplitude > 0.0 and wave_cycles_max > 0.0:
+                cycles = np.random.uniform(wave_cycles_min, wave_cycles_max)
+                phase = np.random.uniform(0.0, 2.0 * math.pi)
+                waviness = wave_amplitude
+            else:
+                cycles = 0.0
+                phase = 0.0
+                waviness = 0.0
+
+            mesh = make_cylinder_mesh(
+                start,
+                end,
+                tube_radius,
+                segments_axis,
+                segments_circ,
+                color,
+                waviness=waviness,
+                wave_phase=phase,
+                wave_cycles=cycles,
+            )
             meshes.append(mesh)
 
     return meshes
@@ -257,6 +286,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tube-radius", type=float, default=0.4, help="Radius of each cylinder surface")
     parser.add_argument("--segments-axis", type=int, default=32, help="Segments along cylinder axis (v direction)")
     parser.add_argument("--segments-circ", type=int, default=48, help="Segments around circumference (u direction)")
+    parser.add_argument("--wave-amplitude", type=float, default=0.0,
+                        help="Fractional amplitude of radius modulation along the axis (0 disables)")
+    parser.add_argument("--wave-cycles-min", type=float, default=0.5,
+                        help="Minimum number of cycles for axial radius variation")
+    parser.add_argument("--wave-cycles-max", type=float, default=2.0,
+                        help="Maximum number of cycles for axial radius variation")
     return parser.parse_args()
 
 
@@ -271,6 +306,9 @@ def main():
         tube_radius=args.tube_radius,
         segments_axis=args.segments_axis,
         segments_circ=args.segments_circ,
+        wave_amplitude=max(0.0, args.wave_amplitude),
+        wave_cycles_min=max(0.0, args.wave_cycles_min),
+        wave_cycles_max=max(args.wave_cycles_min, args.wave_cycles_max),
     )
     write_multi_mesh_glb(meshes, args.output)
     print(f"Wrote {len(meshes)} cylinder meshes to {args.output}")

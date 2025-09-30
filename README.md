@@ -75,6 +75,9 @@ python3 build_tiles.py \
 - `--max_depth`: Maximum tile depth/zoom level (default: 5)
 - `--target_kb`: Target tile size in KB (default: 200)
 - `--split_meshes`: (UV mode) build a separate quadtree for each mesh/primitive inside the GLB; tile outputs are stored under `mesh_<index>/...`
+- `--preserve_borders`: Snap simplified tile boundaries back to their original vertex positions and skip skirt geometry (helps on closed seams)
+- `--snap_radius`: Absolute world-space snapping tolerance (used with `--preserve_borders`)
+- `--snap_ratio`: Relative snapping tolerance expressed as a fraction of the tile’s bounding-box diagonal (default 1e-3, set to 0 to disable when using `--snap_radius` instead)
 
 ### 2. Start the Server
 
@@ -160,9 +163,10 @@ Each GLB tile includes metadata in `mesh.extras`:
 - **Pan**: Middle mouse drag
 - **dat.GUI panel**:
   - **Extract / Time**: Switch between datasets and time indices
-  - **SSE Refine / Coarsen**: Set screen-space error thresholds (0.5–30 px refine, 0.25–15 px coarsen)
+  - **SSE Refine**: Set the maximum screen-space error before refinement (0.1–120 px). The coarsen threshold automatically tracks at half this value for hysteresis.
   - **Wireframe**: Toggle mesh rendering between solid and wireframe
   - **Bounding Boxes**: Overlay each tile's world-space bounding box while keeping the surface visible
+  - **Tile Colours**: Replace surface shading with a unique colour per tile to visualise current LOD coverage
 
 ## Performance Tuning
 
@@ -176,8 +180,8 @@ Each GLB tile includes metadata in `mesh.extras`:
 - Typical values: 4-7
 
 ### SSE Thresholds
-- **Refine threshold**: Pixels of error before loading finer tiles (default: 3.0)
-- **Coarsen threshold**: Hysteresis to prevent LOD thrashing (default: 1.5)
+- **Refine threshold**: Pixels of error before loading finer tiles (default: 3.0; adjustable via GUI 0.1–120 px)
+- **Coarsen threshold**: Automatically set to half the refine value to provide hysteresis and reduce LOD thrashing
 
 ### Cache Settings
 - Adjust `MAX_TILES` in viewer.js for memory usage
@@ -206,7 +210,7 @@ npm start
 ## Example Generators
 
 - `examples/helical/helical.py`: builds an annular helical strip with UVs and colors.
-- `examples/cylinders/cylinders.py`: builds spokes of open cylinders (multiple meshes) between hub and tip radii; supports stacking multiple wheels along the Z-axis.
+- `examples/cylinders/cylinders.py`: builds spokes of open cylinders (multiple meshes) between hub and tip radii; supports stacking multiple wheels along the Z-axis and optional sinusoidal radius modulation per cylinder.
 
 ## Troubleshooting
 

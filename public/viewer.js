@@ -5,7 +5,7 @@ import { GUI } from "dat.gui";
 
 // Configuration
 let SSE_THRESHOLD_REFINE = 3.0;   // pixels
-let SSE_THRESHOLD_COARSEN = 1.5;  // hysteresis
+let SSE_THRESHOLD_COARSEN = 1.5;  // hysteresis (auto-updated)
 const MAX_CONCURRENT = 6;
 const MAX_CACHE_BYTES = 600 * 1024 * 1024; // ~600 MB budget
 const MAX_TILES = 200;
@@ -31,6 +31,9 @@ class TileManager {
     this.loadingIndicator = document.getElementById("loading");
     this.wireframeMode = false; // Track wireframe state
     this.showBoundingBoxes = false; // Diagnostic overlay toggle
+    this.tileColorMode = false; // Diagnostic colouring toggle
+    this._tickLock = false;
+    this._tickPending = false;
   }
 
   async init(manifestUrl) {
@@ -120,11 +123,20 @@ class TileManager {
     return { want, replaceParents };
   }
 
-  async tick() {
+  async _tickOnce() {
     if (!this.manifest) return;
 
     this._updateFrustum();
     const { want, replaceParents } = this._decide();
+
+    // Update visibility of already loaded tiles before any load/unload
+    for (const [id, rec] of this.tiles) {
+      const needed = want.has(id);
+      rec.obj3d.visible = needed;
+      if (rec.bboxHelper) {
+        rec.bboxHelper.visible = this.showBoundingBoxes && needed;
+      }
+    }
 
     // Queue tiles we need but don't have
     for (const id of want) {
@@ -133,14 +145,16 @@ class TileManager {
       }
     }
 
+    // Drop any queued requests we no longer need
+    if (this.queue.length) {
+      this.queue = this.queue.filter(id => want.has(id));
+    }
+
     // Unload tiles we have but don't need
     for (const [id, rec] of [...this.tiles]) {
       if (!want.has(id)) {
         // Keep parent until all children are resident
         const meta = rec.meta || this.byId.get(id);
-        if (replaceParents && replaceParents.has(id) && !this._allChildrenLoaded(meta)) {
-          continue;
-        }
         this._unload(id);
       }
     }
@@ -154,18 +168,47 @@ class TileManager {
         launched.push(this._load(nextId));
       }
       if (launched.length) {
-        await Promise.all(launched);
+        const loaded = await Promise.all(launched);
+        // Hide freshly loaded tiles that are no longer needed
+        for (const rec of loaded) {
+          if (!rec) continue;
+          const id = rec.meta.tileId;
+          const needed = want.has(id);
+          if (!needed) {
+            this._unload(id);
+          } else {
+            rec.obj3d.visible = true;
+            if (rec.bboxHelper) {
+              rec.bboxHelper.visible = this.showBoundingBoxes;
+            }
+          }
+        }
       }
     } while (this.queue.length && this.inflight < MAX_CONCURRENT);
 
     this.hudTiles.textContent = `${this.tiles.size}`;
     this.hudCache.textContent = `${this.cache.size}`;
 
+    this.updateBoundingBoxVisibility();
+
     if (this.inflight > 0 || this.queue.length > 0) {
       if (this.loadingIndicator) this.loadingIndicator.classList.add('active');
     } else {
       if (this.loadingIndicator) this.loadingIndicator.classList.remove('active');
     }
+  }
+
+  async tick() {
+    if (this._tickLock) {
+      this._tickPending = true;
+      return;
+    }
+    this._tickLock = true;
+    do {
+      this._tickPending = false;
+      await this._tickOnce();
+    } while (this._tickPending);
+    this._tickLock = false;
   }
 
   _enqueue(id) {
@@ -176,10 +219,24 @@ class TileManager {
       this.cache.set(id, rec); // Move to end (LRU)
       this.scene.add(rec.obj3d);
       if (rec.bboxHelper) {
-        this.scene.add(rec.bboxHelper);
-        rec.bboxHelper.visible = this.showBoundingBoxes;
+        if (this.showBoundingBoxes) {
+          if (rec.bboxHelper.parent !== this.scene) {
+            this.scene.add(rec.bboxHelper);
+          }
+          rec.bboxHelper.visible = true;
+        } else {
+          rec.bboxHelper.visible = false;
+          if (rec.bboxHelper.parent === this.scene) {
+            this.scene.remove(rec.bboxHelper);
+          }
+        }
       }
       this.tiles.set(id, rec);
+      if (this.tileColorMode) {
+        this._applyTileColor(rec);
+      } else {
+        this._restoreTileMaterial(rec);
+      }
       return;
     }
 
@@ -191,9 +248,10 @@ class TileManager {
 
   async _load(id) {
     const meta = this.byId.get(id);
-    if (!meta) return;
+    if (!meta) return null;
 
     this.inflight++;
+    let rec = null;
     try {
       const glb = await this.loader.loadAsync(meta.url);
       const obj = glb.scene;
@@ -201,7 +259,6 @@ class TileManager {
 
       const fadeInEnabled = !this.wireframeMode;
 
-      // Ensure materials support vertex colors and optional wireframe
       obj.traverse(o => {
         if (o.isMesh && o.material) {
           const newMaterial = new THREE.MeshStandardMaterial({
@@ -217,6 +274,14 @@ class TileManager {
           }
 
           o.material = newMaterial;
+          o.userData.debugInfo = {
+            originalMaterial: newMaterial,
+            debugColor: new THREE.Color().setHSL(Math.random(), 0.7, 0.5),
+            originalColorAttr: o.geometry && o.geometry.attributes && o.geometry.attributes.color
+              ? o.geometry.attributes.color.clone()
+              : null,
+            overrideMaterial: null
+          };
 
           if (!(o.geometry && o.geometry.attributes.color)) {
             o.material = new THREE.MeshStandardMaterial({
@@ -227,6 +292,7 @@ class TileManager {
               wireframe: this.wireframeMode,
               side: THREE.DoubleSide
             });
+            o.userData.debugInfo.originalMaterial = o.material;
           }
         }
       });
@@ -235,8 +301,12 @@ class TileManager {
 
       const bboxHelper = this._createBoundingBoxHelper(meta);
       bboxHelper.userData.tileId = id;
-      bboxHelper.visible = this.showBoundingBoxes;
-      this.scene.add(bboxHelper);
+      if (this.showBoundingBoxes) {
+        bboxHelper.visible = true;
+        this.scene.add(bboxHelper);
+      } else {
+        bboxHelper.visible = false;
+      }
 
       if (fadeInEnabled) {
         const start = performance.now();
@@ -269,14 +339,19 @@ class TileManager {
         });
       }
 
-      const rec = { obj3d: obj, meta, bboxHelper };
+      rec = { obj3d: obj, meta, bboxHelper };
       this.tiles.set(id, rec);
       this._cacheInsert(id, rec);
+
+      if (this.tileColorMode) {
+        this._applyTileColor(rec);
+      }
     } catch (e) {
       console.error("Tile load failed", id, e);
-    } finally {
-      this.inflight--;
     }
+
+    this.inflight--;
+    return rec;
   }
 
   _createBoundingBoxHelper(meta) {
@@ -337,20 +412,84 @@ class TileManager {
     }
   }
 
+  _applyTileColor(rec) {
+    rec.obj3d.traverse(obj => {
+      if (obj.isMesh && obj.userData && obj.userData.debugInfo) {
+        const info = obj.userData.debugInfo;
+        if (!info.overrideMaterial) {
+          info.overrideMaterial = new THREE.MeshBasicMaterial({
+            color: info.debugColor,
+            side: THREE.DoubleSide,
+            fog: false
+          });
+        }
+        obj.material = info.overrideMaterial;
+        const geom = obj.geometry;
+        if (geom && info.originalColorAttr) {
+          geom.deleteAttribute('color');
+        }
+      }
+    });
+  }
+
+  _restoreTileMaterial(rec) {
+    rec.obj3d.traverse(obj => {
+      if (obj.isMesh && obj.userData && obj.userData.debugInfo) {
+        const info = obj.userData.debugInfo;
+        if (info.originalMaterial) {
+          obj.material = info.originalMaterial;
+        }
+        const geom = obj.geometry;
+        if (geom) {
+          if (info.originalColorAttr) {
+            const restored = info.originalColorAttr.clone();
+            restored.needsUpdate = true;
+            geom.setAttribute('color', restored);
+          } else {
+            geom.deleteAttribute('color');
+          }
+        }
+      }
+    });
+  }
+
   updateBoundingBoxVisibility() {
+    const activeHelpers = new Set();
+
     for (const [, rec] of this.tiles) {
-      if (rec.bboxHelper) {
-        rec.bboxHelper.visible = this.showBoundingBoxes;
-        if (this.showBoundingBoxes && rec.bboxHelper.parent !== this.scene) {
+      if (!rec.bboxHelper) continue;
+      if (this.showBoundingBoxes) {
+        rec.bboxHelper.visible = true;
+        if (rec.bboxHelper.parent !== this.scene) {
           this.scene.add(rec.bboxHelper);
+        }
+        activeHelpers.add(rec.bboxHelper);
+      } else {
+        rec.bboxHelper.visible = false;
+        if (rec.bboxHelper.parent === this.scene) {
+          this.scene.remove(rec.bboxHelper);
         }
       }
     }
 
-    for (const [, rec] of this.cache) {
-      if (rec.bboxHelper) {
-        rec.bboxHelper.visible = this.showBoundingBoxes;
+    for (const [id, rec] of this.cache) {
+      if (this.tiles.has(id)) continue;
+      if (!rec.bboxHelper) continue;
+      rec.bboxHelper.visible = false;
+      if (rec.bboxHelper.parent === this.scene) {
+        this.scene.remove(rec.bboxHelper);
       }
+    }
+
+    // Remove any lingering helpers that no longer correspond to active tiles
+    const strayHelpers = [];
+    for (const child of this.scene.children) {
+      if (child.isBox3Helper && !activeHelpers.has(child)) {
+        strayHelpers.push(child);
+      }
+    }
+    for (const helper of strayHelpers) {
+      this.scene.remove(helper);
     }
   }
 
@@ -428,9 +567,9 @@ class TileManager {
     extract: 'default',
     time: '0',
     sseRefine: SSE_THRESHOLD_REFINE,
-    sseCoarsen: SSE_THRESHOLD_COARSEN,
     wireframe: false,
-    boundingBoxes: false
+    boundingBoxes: false,
+    tileColorMode: false
   };
 
   const gui = new GUI({ width: 300 });
@@ -537,12 +676,9 @@ class TileManager {
     }
   }
 
-  lodFolder.add(settings, 'sseRefine', 0.5, 30, 0.5).name('SSE Refine').onChange((value) => {
+  lodFolder.add(settings, 'sseRefine', 0.1, 120, 0.1).name('SSE Refine').onChange((value) => {
     SSE_THRESHOLD_REFINE = value;
-    mgr.tick();
-  });
-  lodFolder.add(settings, 'sseCoarsen', 0.25, 15, 0.25).name('SSE Coarsen').onChange((value) => {
-    SSE_THRESHOLD_COARSEN = value;
+    SSE_THRESHOLD_COARSEN = Math.max(0.05, value * 0.5);
     mgr.tick();
   });
 
@@ -550,12 +686,26 @@ class TileManager {
     settings.wireframe = value;
     mgr.wireframeMode = value;
     applyWireframe(value);
+    mgr.tick();
   });
 
   diagnosticsFolder.add(settings, 'boundingBoxes').name('Bounding Boxes').onChange((value) => {
     settings.boundingBoxes = value;
     mgr.showBoundingBoxes = value;
     mgr.updateBoundingBoxVisibility();
+  });
+
+  diagnosticsFolder.add(settings, 'tileColorMode').name('Tile Colours').onChange((value) => {
+    mgr.tileColorMode = value;
+    if (value) {
+      for (const [, rec] of mgr.tiles) {
+        mgr._applyTileColor(rec);
+      }
+    } else {
+      for (const [, rec] of mgr.tiles) {
+        mgr._restoreTileMaterial(rec);
+      }
+    }
   });
 
   diagnosticsFolder.open();

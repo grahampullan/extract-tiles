@@ -434,7 +434,8 @@ def subset_trimesh(pos, uv, col, idx, tri_mask):
 
 def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                       max_depth=MAX_DEPTH, target_bytes=TARGET_TILE_BYTES,
-                      split_meshes=False):
+                      split_meshes=False, preserve_borders=False,
+                      snap_radius=None, snap_ratio=None):
     """Build UV-based quadtree tiles"""
     mesh_entries = []
     if split_meshes:
@@ -519,7 +520,25 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                     if m is None:
                         continue
 
+                    orig_border_pts = None
+                    snap_tol = None
+                    if preserve_borders:
+                        border_edges = compute_border_edges(m)
+                        if border_edges:
+                            unique_idx = np.unique(np.asarray(border_edges).flatten())
+                            orig_border_pts = np.asarray(m.vertices)[unique_idx]
+                            diag = float(np.linalg.norm(m.bounds[1] - m.bounds[0]))
+                            if snap_radius is not None:
+                                snap_tol = snap_radius
+                            elif snap_ratio is not None and diag > 0:
+                                snap_tol = snap_ratio * diag
+                            elif snap_ratio is not None:
+                                snap_tol = snap_ratio
+
                     m = decimate_to_target(m, target_bytes)
+
+                    if preserve_borders and orig_border_pts is not None and snap_tol is not None:
+                        snap_decimated_border(m, orig_border_pts, snap_radius=snap_tol)
 
                     aabb_min = m.bounds[0].tolist()
                     aabb_max = m.bounds[1].tolist()
@@ -550,7 +569,8 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
 
                     out_path = os.path.join(out_dir, extract, str(time_index),
                                            f"mesh_{mesh_idx}", str(z), str(x), f"{y}.glb")
-                    add_skirts(m, skirt_h_ratio=0.10)
+                    if not preserve_borders:
+                        add_skirts(m, skirt_h_ratio=0.10)
                     write_glb_from_trimesh(m, meta, out_path)
                     mesh_tiles[tid] = {**meta, "url": f"/tiles/{extract}/{time_index}/mesh_{mesh_idx}/{z}/{x}/{y}.glb"}
 
@@ -627,7 +647,8 @@ def subset_trimesh_by_mask(pos, idx, mask, uv=None, col=None):
     return m
 
 def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
-                       max_depth=MAX_DEPTH, target_bytes=TARGET_TILE_BYTES):
+                       max_depth=MAX_DEPTH, target_bytes=TARGET_TILE_BYTES,
+                       preserve_borders=False, snap_radius=None, snap_ratio=None):
     """Build world-space octree tiles"""
     pos, uv, col, idx = load_glb_arrays(src_glb)
 
@@ -667,7 +688,25 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                     if m is None:
                         continue
 
+                    orig_border_pts = None
+                    snap_tol = None
+                    if preserve_borders:
+                        border_edges = compute_border_edges(m)
+                        if border_edges:
+                            unique_idx = np.unique(np.asarray(border_edges).flatten())
+                            orig_border_pts = np.asarray(m.vertices)[unique_idx]
+                            diag = float(np.linalg.norm(m.bounds[1] - m.bounds[0]))
+                            if snap_radius is not None:
+                                snap_tol = snap_radius
+                            elif snap_ratio is not None and diag > 0:
+                                snap_tol = snap_ratio * diag
+                            elif snap_ratio is not None:
+                                snap_tol = snap_ratio
+
                     m = decimate_to_target(m, target_bytes)
+
+                    if preserve_borders and orig_border_pts is not None and snap_tol is not None:
+                        snap_decimated_border(m, orig_border_pts, snap_radius=snap_tol)
 
                     aabb_min = m.bounds[0].tolist()
                     aabb_max = m.bounds[1].tolist()
@@ -695,7 +734,8 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
 
                     out_path = os.path.join(out_dir, extract, str(time_index),
                                            str(z), str(i), str(j), f"{k}.glb")
-                    add_skirts(m, skirt_h_ratio=0.10)
+                    if not preserve_borders:
+                        add_skirts(m, skirt_h_ratio=0.10)
                     write_glb_from_trimesh(m, meta, out_path)
                     tiles_meta[tid] = {**meta, "url": f"/tiles/{extract}/{time_index}/{z}/{i}/{j}/{k}.glb"}
 
@@ -816,23 +856,44 @@ def main():
                        help='Target tile size in KB')
     parser.add_argument('--split_meshes', action='store_true',
                        help='UV mode only: build a separate quadtree for each mesh primitive')
+    parser.add_argument('--preserve_borders', action='store_true',
+                       help='Snap decimated tile borders back to original positions and disable skirts')
+    parser.add_argument('--snap_radius', type=float, default=None,
+                       help='Absolute snap radius (world units) when --preserve_borders is enabled')
+    parser.add_argument('--snap_ratio', type=float, default=1e-3,
+                       help='Relative snap tolerance as a fraction of tile diagonal (set 0 to disable)')
 
     args = parser.parse_args()
 
     target_bytes = int(args.target_kb * 1024)
 
+    if args.snap_radius is not None and args.snap_radius <= 0:
+        raise ValueError('snap_radius must be positive if specified')
+
+    snap_ratio = args.snap_ratio if args.snap_ratio is not None and args.snap_ratio > 0 else None
+    snap_radius = args.snap_radius
+
+    if args.preserve_borders and snap_radius is None and snap_ratio is None:
+        snap_ratio = 1e-3  # default relative tolerance
+
     if args.tiling_space == 'uv':
         build_uv_quadtree(
             args.in_glb, args.out_dir, args.extract, args.time,
             args.max_depth, target_bytes,
-            split_meshes=args.split_meshes
+            split_meshes=args.split_meshes,
+            preserve_borders=args.preserve_borders,
+            snap_radius=snap_radius,
+            snap_ratio=snap_ratio
         )
     else:  # world
         if args.split_meshes:
             raise ValueError('--split_meshes is only supported for uv tiling space')
         build_world_octree(
             args.in_glb, args.out_dir, args.extract, args.time,
-            args.max_depth, target_bytes
+            args.max_depth, target_bytes,
+            preserve_borders=args.preserve_borders,
+            snap_radius=snap_radius,
+            snap_ratio=snap_ratio
         )
 
 if __name__ == '__main__':
