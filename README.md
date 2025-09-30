@@ -50,7 +50,8 @@ python3 build_tiles.py \
   --time 0 \
   --tiling_space uv \
   --max_depth 5 \
-  --target_kb 200
+  --target_kb 200 \
+  --split_meshes
 ```
 
 #### World-Space Octree mode (no UVs required):
@@ -73,6 +74,7 @@ python3 build_tiles.py \
 - `--tiling_space`: Either 'uv' or 'world'
 - `--max_depth`: Maximum tile depth/zoom level (default: 5)
 - `--target_kb`: Target tile size in KB (default: 200)
+- `--split_meshes`: (UV mode) build a separate quadtree for each mesh/primitive inside the GLB; tile outputs are stored under `mesh_<index>/...`
 
 ### 2. Start the Server
 
@@ -200,6 +202,11 @@ npm start
 
 # Open browser to http://localhost:8080
 ```
+
+## Example Generators
+
+- `examples/helical/helical.py`: builds an annular helical strip with UVs and colors.
+- `examples/cylinders/cylinders.py`: builds spokes of open cylinders (multiple meshes) between hub and tip radii; supports stacking multiple wheels along the Z-axis.
 
 ## Troubleshooting
 

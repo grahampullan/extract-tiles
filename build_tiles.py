@@ -105,6 +105,68 @@ def load_glb_arrays(path):
     return pos, uv, col, idx
 
 
+def load_glb_mesh_primitives(path):
+    """Load GLB and return per-primitive arrays (positions, uv, colors, indices)."""
+    gltf = GLTF2().load_binary(path)
+    blob = gltf.binary_blob()
+
+    def to_np(acc_idx):
+        if acc_idx is None:
+            return None
+        acc = gltf.accessors[acc_idx]
+        bv = gltf.bufferViews[acc.bufferView]
+        start = (bv.byteOffset or 0) + (acc.byteOffset or 0)
+        ncomp = {"SCALAR":1,"VEC2":2,"VEC3":3,"VEC4":4}[acc.type]
+        ct2dt = {5126:np.float32, 5125:np.uint32, 5123:np.uint16, 5121:np.uint8}
+        dt = ct2dt[acc.componentType]
+        arr = np.frombuffer(blob, dtype=dt, count=acc.count*ncomp, offset=start)
+        return arr.reshape(acc.count, ncomp)
+
+    meshes = []
+    for mesh_idx, mesh in enumerate(gltf.meshes or []):
+        for prim_idx, prim in enumerate(mesh.primitives or []):
+            pos = to_np(prim.attributes.POSITION)
+            if pos is None:
+                continue
+            pos = pos.astype(np.float32)
+
+            idx = to_np(prim.indices)
+            if idx is None:
+                idx = np.arange(len(pos), dtype=np.uint32).reshape(-1, 1)
+            idx = idx.astype(np.uint32).reshape(-1)
+
+            uv = None
+            if hasattr(prim.attributes, 'TEXCOORD_0') and prim.attributes.TEXCOORD_0 is not None:
+                uv = to_np(prim.attributes.TEXCOORD_0)
+                if uv is not None:
+                    uv = uv.astype(np.float32)
+
+            col = None
+            if hasattr(prim.attributes, 'COLOR_0') and prim.attributes.COLOR_0 is not None:
+                col_raw = to_np(prim.attributes.COLOR_0)
+                if col_raw.dtype == np.uint8:
+                    if col_raw.shape[1] == 3:
+                        col = np.hstack([col_raw, np.full((col_raw.shape[0],1), 255, dtype=np.uint8)])
+                    else:
+                        col = col_raw.astype(np.uint8)
+                else:
+                    c = np.clip(col_raw.astype(np.float32), 0.0, 1.0)
+                    if c.shape[1] == 3:
+                        c = np.hstack([c, np.ones((c.shape[0],1), np.float32)])
+                    col = (c * 255.0 + 0.5).astype(np.uint8)
+
+            meshes.append({
+                "name": mesh.name or f"mesh{mesh_idx}",
+                "primitive": prim_idx,
+                "positions": pos,
+                "indices": idx,
+                "uv": uv,
+                "colors": col,
+            })
+
+    return meshes
+
+
 def tri_areas(verts, idx):
     """Calculate area of each triangle"""
     a = verts[idx[0::3]]
@@ -371,14 +433,48 @@ def subset_trimesh(pos, uv, col, idx, tri_mask):
     return m
 
 def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
-                      max_depth=MAX_DEPTH, target_bytes=TARGET_TILE_BYTES):
+                      max_depth=MAX_DEPTH, target_bytes=TARGET_TILE_BYTES,
+                      split_meshes=False):
     """Build UV-based quadtree tiles"""
-    pos, uv, col, idx = load_glb_arrays(src_glb)
-    if uv is None:
-        raise ValueError("UV mode requires TEXCOORD_0")
+    mesh_entries = []
+    if split_meshes:
+        mesh_entries = load_glb_mesh_primitives(src_glb)
+        if not mesh_entries:
+            raise RuntimeError("No meshes/primitives found in GLB.")
+        for entry in mesh_entries:
+            if entry["uv"] is None:
+                raise ValueError("split_meshes requires TEXCOORD_0 on every primitive")
+    else:
+        pos, uv, col, idx = load_glb_arrays(src_glb)
+        if uv is None:
+            raise ValueError("UV mode requires TEXCOORD_0")
+        mesh_entries = [{
+            "name": os.path.splitext(os.path.basename(src_glb))[0],
+            "primitive": 0,
+            "positions": pos,
+            "indices": idx,
+            "uv": uv,
+            "colors": col,
+        }]
 
-    triA = tri_areas(pos, idx)
-    triC = uv_centroids(uv, idx)
+    mesh_entries = [entry for entry in mesh_entries if entry["indices"].size > 0]
+
+    total_triangles = 0
+    total_area = 0.0
+    min_area = math.inf
+    for entry in mesh_entries:
+        triA = tri_areas(entry["positions"], entry["indices"])
+        total_triangles += len(triA)
+        total_area += float(triA.sum())
+        if len(triA) > 0:
+            min_area = min(min_area, float(triA.min()))
+
+    if total_triangles == 0:
+        raise RuntimeError("No triangles found in GLB.")
+
+    avg_area = total_area / total_triangles
+    if min_area is math.inf:
+        min_area = 0.0
 
     manifest = {
         "extract": extract,
@@ -389,62 +485,78 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
         "maxDepth": max_depth,
         "targetTileBytes": target_bytes,
         "global": {
-            "triCount": int(len(triA)),
-            "avgTriArea": float(triA.mean()),
-            "minTriArea": float(triA.min())
+            "triCount": int(total_triangles),
+            "avgTriArea": float(avg_area),
+            "minTriArea": float(min_area)
         },
-        "charts": 0,
+        "charts": len(mesh_entries),
         "tiles": []
     }
 
-    tiles_meta = {}
+    all_tiles = []
 
-    # Process tiles from coarsest to finest
-    for z in range(max_depth, -1, -1):
-        for x in range(1<<z):
-            for y in range(1<<z):
-                b = uv_tile_bounds(z,x,y)
-                mask = uv_in_tile(triC, b)
-                m = subset_trimesh(pos, uv, col, idx, mask)
+    for mesh_idx, entry in enumerate(mesh_entries):
+        pos = entry["positions"]
+        uv = entry["uv"]
+        col = entry["colors"]
+        idx = entry["indices"]
 
-                if m is None:
-                    continue
+        triA = tri_areas(pos, idx)
+        triC = uv_centroids(uv, idx)
 
-                m = decimate_to_target(m, target_bytes)
+        if triA.size == 0:
+            continue
 
-                aabb_min = m.bounds[0].tolist()
-                aabb_max = m.bounds[1].tolist()
-                tid = f"{z}/{x}/{y}"
+        mesh_tiles = {}
 
-                kids = [f"{z+1}/{2*x+dx}/{2*y+dy}" for dx in (0,1) for dy in (0,1)] if z<max_depth else []
+        for z in range(max_depth, -1, -1):
+            for x in range(1<<z):
+                for y in range(1<<z):
+                    b = uv_tile_bounds(z,x,y)
+                    mask = uv_in_tile(triC, b)
+                    m = subset_trimesh(pos, uv, col, idx, mask)
 
-                approx = estimate_bytes(len(m.vertices), len(m.faces),
-                                       m.visual.uv is not None,
-                                       m.visual.vertex_colors is not None)
+                    if m is None:
+                        continue
 
-                meta = {
-                    "tileId": tid,
-                    "z": z, "x": x, "y": y,
-                    "parent": f"{z-1}/{x>>1}/{y>>1}" if z>0 else None,
-                    "children": kids,
-                    "aabbWorld": [aabb_min, aabb_max],
-                    "aabbUV": [[b[0],b[1]], [b[2],b[3]]],
-                    "triCount": int(len(m.faces)),
-                    "avgTriArea": float(triA.mean()),
-                    "minTriArea": float(triA.min()),
-                    "geometricError": float(np.mean(m.edges_unique_length)) if m.edges_unique_length.size>0 else 0.0,
-                    "approxBytes": int(approx),
-                    "time": time_index
-                }
+                    m = decimate_to_target(m, target_bytes)
 
-                out_path = os.path.join(out_dir, extract, str(time_index),
-                                       str(z), str(x), f"{y}.glb")
-                add_skirts(m, skirt_h_ratio=0.10)
-                write_glb_from_trimesh(m, meta, out_path)
-                tiles_meta[tid] = {**meta, "url": f"/tiles/{extract}/{time_index}/{z}/{x}/{y}.glb"}
+                    aabb_min = m.bounds[0].tolist()
+                    aabb_max = m.bounds[1].tolist()
+                    tid = f"{mesh_idx}/{z}/{x}/{y}"
 
-    manifest["tiles"] = [tiles_meta[k] for k in sorted(tiles_meta.keys(),
-                         key=lambda t: tuple(map(int,t.split('/'))))]
+                    kids = [f"{mesh_idx}/{z+1}/{2*x+dx}/{2*y+dy}" for dx in (0,1) for dy in (0,1)] if z<max_depth else []
+
+                    approx = estimate_bytes(len(m.vertices), len(m.faces),
+                                           m.visual.uv is not None,
+                                           m.visual.vertex_colors is not None)
+
+                    meta = {
+                        "tileId": tid,
+                        "mesh": mesh_idx,
+                        "meshName": entry["name"],
+                        "z": z, "x": x, "y": y,
+                        "parent": f"{mesh_idx}/{z-1}/{x>>1}/{y>>1}" if z>0 else None,
+                        "children": kids,
+                        "aabbWorld": [aabb_min, aabb_max],
+                        "aabbUV": [[b[0],b[1]], [b[2],b[3]]],
+                        "triCount": int(len(m.faces)),
+                        "avgTriArea": float(triA.mean()) if len(triA) else 0.0,
+                        "minTriArea": float(triA.min()) if len(triA) else 0.0,
+                        "geometricError": float(np.mean(m.edges_unique_length)) if m.edges_unique_length.size>0 else 0.0,
+                        "approxBytes": int(approx),
+                        "time": time_index
+                    }
+
+                    out_path = os.path.join(out_dir, extract, str(time_index),
+                                           f"mesh_{mesh_idx}", str(z), str(x), f"{y}.glb")
+                    add_skirts(m, skirt_h_ratio=0.10)
+                    write_glb_from_trimesh(m, meta, out_path)
+                    mesh_tiles[tid] = {**meta, "url": f"/tiles/{extract}/{time_index}/mesh_{mesh_idx}/{z}/{x}/{y}.glb"}
+
+        all_tiles.extend(mesh_tiles.values())
+
+    manifest["tiles"] = sorted(all_tiles, key=lambda t: (t.get("mesh", 0), t["z"], t["x"], t["y"]))
 
     man_path = os.path.join(out_dir, extract, f"manifest_{time_index}.json")
     pathlib.Path(os.path.dirname(man_path)).mkdir(parents=True, exist_ok=True)
@@ -452,7 +564,7 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
     with open(man_path, "w") as f:
         json.dump(manifest, f, indent=2)
 
-    print(f"Generated {len(tiles_meta)} UV-quadtree tiles")
+    print(f"Generated {len(all_tiles)} UV-quadtree tiles across {len(mesh_entries)} mesh charts")
 
 # ============================================================================
 # World-Space Octree Mode
@@ -702,6 +814,8 @@ def main():
     parser.add_argument('--max_depth', type=int, default=5, help='Maximum tile depth')
     parser.add_argument('--target_kb', type=float, default=200,
                        help='Target tile size in KB')
+    parser.add_argument('--split_meshes', action='store_true',
+                       help='UV mode only: build a separate quadtree for each mesh primitive')
 
     args = parser.parse_args()
 
@@ -710,9 +824,12 @@ def main():
     if args.tiling_space == 'uv':
         build_uv_quadtree(
             args.in_glb, args.out_dir, args.extract, args.time,
-            args.max_depth, target_bytes
+            args.max_depth, target_bytes,
+            split_meshes=args.split_meshes
         )
     else:  # world
+        if args.split_meshes:
+            raise ValueError('--split_meshes is only supported for uv tiling space')
         build_world_octree(
             args.in_glb, args.out_dir, args.extract, args.time,
             args.max_depth, target_bytes
