@@ -168,6 +168,7 @@ class TileManager {
         launched.push(this._load(nextId));
       }
       if (launched.length) {
+        this._setLoadingIndicator(true);
         const loaded = await Promise.all(launched);
         // Hide freshly loaded tiles that are no longer needed
         for (const rec of loaded) {
@@ -191,11 +192,7 @@ class TileManager {
 
     this.updateBoundingBoxVisibility();
 
-    if (this.inflight > 0 || this.queue.length > 0) {
-      if (this.loadingIndicator) this.loadingIndicator.classList.add('active');
-    } else {
-      if (this.loadingIndicator) this.loadingIndicator.classList.remove('active');
-    }
+    this._setLoadingIndicator(this.inflight > 0 || this.queue.length > 0);
   }
 
   async tick() {
@@ -209,6 +206,15 @@ class TileManager {
       await this._tickOnce();
     } while (this._tickPending);
     this._tickLock = false;
+  }
+
+  _setLoadingIndicator(active) {
+    if (!this.loadingIndicator) return;
+    if (active) {
+      this.loadingIndicator.classList.add('active');
+    } else {
+      this.loadingIndicator.classList.remove('active');
+    }
   }
 
   _enqueue(id) {
@@ -384,31 +390,39 @@ class TileManager {
 
     // Evict oldest if cache too large
     while (this.cache.size > MAX_TILES || this.cacheBytes > MAX_CACHE_BYTES) {
-      const evict = this.cache.keys().next().value;
-      if (!this.tiles.has(evict)) {
-        const evictRec = this.cache.get(evict);
-        if (evictRec) {
-          const eb = (evictRec.meta && evictRec.meta.approxBytes) ? evictRec.meta.approxBytes : 0;
-          this.cacheBytes = Math.max(0, this.cacheBytes - eb);
-          evictRec.obj3d.traverse(o => {
-            if (o.isMesh || o.isLine) {
-              o.geometry?.dispose();
-              if (o.material) {
-                if (o.material.map) o.material.map.dispose();
-                o.material.dispose?.();
-              }
-            }
-          });
-          if (evictRec.bboxHelper) {
-            this.scene.remove(evictRec.bboxHelper);
-            evictRec.bboxHelper.geometry?.dispose();
-            evictRec.bboxHelper.material?.dispose();
-          }
+      let evictCandidate = null;
+      for (const key of this.cache.keys()) {
+        if (!this.tiles.has(key)) {
+          evictCandidate = key;
+          break;
         }
-        this.cache.delete(evict);
-      } else {
-        break; // Can't evict tiles that are currently loaded
       }
+
+      if (!evictCandidate) {
+        // Every cached entry is currently active; stop trying to evict.
+        break;
+      }
+
+      const evictRec = this.cache.get(evictCandidate);
+      if (evictRec) {
+        const eb = (evictRec.meta && evictRec.meta.approxBytes) ? evictRec.meta.approxBytes : 0;
+        this.cacheBytes = Math.max(0, this.cacheBytes - eb);
+        evictRec.obj3d.traverse(o => {
+          if (o.isMesh || o.isLine) {
+            o.geometry?.dispose();
+            if (o.material) {
+              if (o.material.map) o.material.map.dispose();
+              o.material.dispose?.();
+            }
+          }
+        });
+        if (evictRec.bboxHelper) {
+          this.scene.remove(evictRec.bboxHelper);
+          evictRec.bboxHelper.geometry?.dispose();
+          evictRec.bboxHelper.material?.dispose();
+        }
+      }
+      this.cache.delete(evictCandidate);
     }
   }
 
