@@ -281,38 +281,53 @@ def estimate_bytes(nv, nf, has_uv=True, has_col=True):
     per_f = 12
     return nv*per_v + nf*per_f + 1024  # small header fudge
 
-def decimate_to_target(m: tm.Trimesh, target_bytes):
-    """Decimate mesh to meet target byte size"""
-    # Estimate current size
-    cur = estimate_bytes(len(m.vertices), len(m.faces),
-                         m.visual.uv is not None,
-                         m.visual.vertex_colors is not None)
-    if cur <= target_bytes*(1+SIZE_TOLERANCE):
-        return m
+def decimate_to_target(m: tm.Trimesh, target_bytes, min_ratio=0.02, min_tris=32, max_iter=6):
+    """Iteratively decimate mesh until it meets the target byte budget."""
+    src_uv = getattr(m.visual, 'uv', None)
+    src_col = getattr(m.visual, 'vertex_colors', None)
 
-    ratio = max(0.05, target_bytes/cur)
-    target_tris = max(1, int(len(m.faces)*ratio))
+    current = m.copy()
+    for iteration in range(max_iter):
+        cur_size = estimate_bytes(len(current.vertices), len(current.faces),
+                                  src_uv is not None, src_col is not None)
+        if cur_size <= target_bytes * (1 + SIZE_TOLERANCE):
+            break
+        if len(current.faces) <= min_tris:
+            break
 
-    g = o3d_from_trimesh(m)
-    g_s = g.simplify_quadric_decimation(target_number_of_triangles=target_tris)
+        ratio = max(min_ratio, target_bytes / cur_size)
+        target_tris = max(min_tris, int(len(current.faces) * ratio))
 
-    simp_pos = np.asarray(g_s.vertices).astype(np.float32)
-    simp_faces = np.asarray(g_s.triangles).astype(np.uint32)
+        g = o3d_from_trimesh(current)
+        g_s = g.simplify_quadric_decimation(target_number_of_triangles=target_tris)
 
-    simp_uv, simp_col = transfer_attrs_nn(
-        np.asarray(m.vertices),
-        m.visual.uv,
-        m.visual.vertex_colors,
-        simp_pos
-    )
+        simp_pos = np.asarray(g_s.vertices, dtype=np.float32)
+        simp_faces = np.asarray(g_s.triangles, dtype=np.uint32)
 
-    m_s = tm.Trimesh(vertices=simp_pos, faces=simp_faces, process=False)
-    if simp_uv is not None:
-        m_s.visual.uv = simp_uv
-    if simp_col is not None:
-        m_s.visual.vertex_colors = simp_col
+        if simp_faces.shape[0] == 0 or simp_pos.shape[0] == 0:
+            break
 
-    return m_s
+        simp_uv, simp_col = transfer_attrs_nn(
+            np.asarray(current.vertices),
+            src_uv,
+            src_col,
+            simp_pos
+        )
+
+        next_mesh = tm.Trimesh(vertices=simp_pos, faces=simp_faces, process=False)
+        if simp_uv is not None:
+            next_mesh.visual.uv = simp_uv
+        if simp_col is not None:
+            next_mesh.visual.vertex_colors = simp_col
+
+        # If simplification produced no change, stop.
+        if len(next_mesh.faces) >= len(current.faces):
+            current = next_mesh
+            break
+
+        current = next_mesh
+
+    return current
 
 def write_glb_from_trimesh(m: tm.Trimesh, meta: dict, out_path: str):
     """Write trimesh to GLB file with metadata.
@@ -328,16 +343,18 @@ def write_glb_from_trimesh(m: tm.Trimesh, meta: dict, out_path: str):
     vertex_count = positions.shape[0]
 
     uv = None
-    if m.visual.uv is not None:
-        uv_raw = np.asarray(m.visual.uv, dtype=np.float32)
+    uv_attr = getattr(m.visual, 'uv', None)
+    if uv_attr is not None:
+        uv_raw = np.asarray(uv_attr, dtype=np.float32)
         if uv_raw.shape[0] == vertex_count:
             uv = uv_raw
         else:
             print(f"Warning: UV count {uv_raw.shape[0]} != vertex count {vertex_count}, skipping UVs")
 
     colors = None
-    if m.visual.vertex_colors is not None:
-        colors_raw = np.asarray(m.visual.vertex_colors, dtype=np.uint8)
+    color_attr = getattr(m.visual, 'vertex_colors', None)
+    if color_attr is not None:
+        colors_raw = np.asarray(color_attr, dtype=np.uint8)
         if colors_raw.shape[0] == vertex_count:
             colors = colors_raw
         else:
@@ -598,8 +615,8 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                     kids = [f"{mesh_idx}/{z+1}/{2*x+dx}/{2*y+dy}" for dx in (0,1) for dy in (0,1)] if z<max_depth else []
 
                     approx = estimate_bytes(len(m.vertices), len(m.faces),
-                                           m.visual.uv is not None,
-                                           m.visual.vertex_colors is not None)
+                                           getattr(m.visual, 'uv', None) is not None,
+                                           getattr(m.visual, 'vertex_colors', None) is not None)
 
                     meta = {
                         "tileId": tid,
@@ -770,7 +787,7 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                     aabb_max = m.bounds[1].tolist()
 
                     approx = estimate_bytes(len(m.vertices), len(m.faces),
-                                           False, m.visual.vertex_colors is not None)
+                                           False, getattr(m.visual, 'vertex_colors', None) is not None)
 
                     tid = f"{z}/{i}/{j}/{k}"
                     kids = [f"{z+1}/{2*i+di}/{2*j+dj}/{2*k+dk}"
