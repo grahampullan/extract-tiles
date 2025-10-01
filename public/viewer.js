@@ -74,6 +74,28 @@ class TileManager {
     return true;
   }
 
+  _hasPendingDescendants(tileId, wantSet) {
+    for (const candidateId of wantSet) {
+      if (candidateId === tileId) continue;
+      let currentId = candidateId;
+      while (currentId) {
+        if (currentId === tileId) {
+          if (!this.tiles.has(candidateId)) {
+            return true;
+          }
+          break;
+        }
+        const meta = this.byId.get(currentId);
+        if (!meta || !meta.parent) {
+          currentId = null;
+        } else {
+          currentId = meta.parent;
+        }
+      }
+    }
+    return false;
+  }
+
   _sse(meta) {
     const c = new THREE.Vector3(...meta.aabbWorld[0])
       .add(new THREE.Vector3(...meta.aabbWorld[1]))
@@ -131,7 +153,8 @@ class TileManager {
 
     // Update visibility of already loaded tiles before any load/unload
     for (const [id, rec] of this.tiles) {
-      const needed = want.has(id);
+      const keepAsFallback = replaceParents.has(id) && this._hasPendingDescendants(id, want);
+      const needed = want.has(id) || keepAsFallback;
       rec.obj3d.visible = needed;
       if (rec.bboxHelper) {
         rec.bboxHelper.visible = this.showBoundingBoxes && needed;
@@ -153,9 +176,10 @@ class TileManager {
     // Unload tiles we have but don't need
     for (const [id, rec] of [...this.tiles]) {
       if (!want.has(id)) {
-        // Keep parent until all children are resident
-        const meta = rec.meta || this.byId.get(id);
-        this._unload(id);
+        const keepAsFallback = replaceParents.has(id) && this._hasPendingDescendants(id, want);
+        if (!keepAsFallback) {
+          this._unload(id);
+        }
       }
     }
 
@@ -174,7 +198,8 @@ class TileManager {
         for (const rec of loaded) {
           if (!rec) continue;
           const id = rec.meta.tileId;
-          const needed = want.has(id);
+          const keepAsFallback = replaceParents.has(id) && this._hasPendingDescendants(id, want);
+          const needed = want.has(id) || keepAsFallback;
           if (!needed) {
             this._unload(id);
           } else {
