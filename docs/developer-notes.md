@@ -68,9 +68,11 @@ Quick summary (mostly unchanged):
 `TileManager` is the core orchestrator. Important members:
 
 * `loader` – `GLTFLoader` instance.
-* `byId`, `tiles`, `cache` – manifest lookup, active tiles, and cached tiles (LRU style).
+* `byId`, `tiles`, `cache` – manifest lookup, active tiles, and cached tiles (LRU style, default cap 500 tiles / ~600 MB).
 * `queue`, `inflight` – track pending/active loads.
 * Diagnostics toggles: `wireframeMode`, `showBoundingBoxes`, `tileColorMode`.
+* `rootTileIds` – set of `tileId`s whose `parent` is `null`. Roots are kept in the cache (eviction skips them) so they can be reinstated quickly, but they are only visible when the LOD logic needs them as a fallback.
+* `_hasPendingDescendants(tileId, wantSet)` – helper used during LOD transitions to keep a parent visible while any wanted descendants are still loading.
 * `_tickLock`, `_tickPending` – ensure the async tick loop doesn’t overlap.
 
 ### 3.2. Lifecycle
@@ -119,10 +121,10 @@ Quick summary (mostly unchanged):
 
 4. **Queue**: Enqueue missing tiles; filter duplicate/stale IDs from `this.queue` so only still-needed tiles remain.
 
-5. **Removal**: Call `_unload` for any active tile not in `want`. Parent/child overlap is avoided because removal happens before new loads land.
+5. **Removal**: Call `_unload` for any active tile not in `want`. Parents remain visible while any of their wanted descendants are still loading (`_hasPendingDescendants`). Root tiles are always retained as a fallback.
 
 6. **Load burst**: While there are queued IDs and `inflight < MAX_CONCURRENT`, shift IDs into `_load`. After `Promise.all()` resolves, inspect each returned tile record:
-   * If tile is still wanted, ensure it’s visible and helper state matches diagnostics.
+   * If tile is still wanted (or acting as a fallback) keep it visible and sync helper state.
    * Otherwise, `_unload(id)` immediately to guard against late arrivals.
 
 7. **HUD update**: Update tile/cache counts, bounding boxes, and loading indicator via `_setLoadingIndicator(active)`.

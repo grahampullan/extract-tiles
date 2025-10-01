@@ -163,7 +163,7 @@ Each GLB tile includes metadata in `mesh.extras`:
 - **Pan**: Middle mouse drag
 - **dat.GUI panel**:
   - **Extract / Time**: Switch between datasets and time indices
-  - **SSE Refine**: Set the maximum screen-space error before refinement (0.1–120 px). The coarsen threshold automatically tracks at half this value for hysteresis.
+  - **SSE Refine**: Set the maximum screen-space error before refinement (0.1–50 px). The coarsen threshold automatically tracks at half this value for hysteresis.
   - **Wireframe**: Toggle mesh rendering between solid and wireframe
   - **Bounding Boxes**: Overlay each tile's world-space bounding box while keeping the surface visible
   - **Tile Colours**: Replace surface shading with a unique colour per tile to visualise current LOD coverage
@@ -185,7 +185,7 @@ Each GLB tile includes metadata in `mesh.extras`:
 
 ### Cache Settings
 - Adjust `MAX_TILES` in viewer.js for memory usage
-- Default: 200 tiles for single viewer, 400 for multi
+- Default: 500 tiles for the single viewer (roots are always kept resident)
 
 ## API Endpoints
 

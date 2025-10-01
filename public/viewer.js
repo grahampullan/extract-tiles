@@ -4,11 +4,11 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GUI } from "dat.gui";
 
 // Configuration
-let SSE_THRESHOLD_REFINE = 3.0;   // pixels
-let SSE_THRESHOLD_COARSEN = 1.5;  // hysteresis (auto-updated)
+let SSE_THRESHOLD_REFINE = 6.0;   // pixels
+let SSE_THRESHOLD_COARSEN = 3.0;  // hysteresis (auto-updated)
 const MAX_CONCURRENT = 6;
 const MAX_CACHE_BYTES = 600 * 1024 * 1024; // ~600 MB budget
-const MAX_TILES = 200;
+const MAX_TILES = 500;
 
 class TileManager {
   constructor(scene, camera, renderer) {
@@ -32,15 +32,20 @@ class TileManager {
     this.wireframeMode = false; // Track wireframe state
     this.showBoundingBoxes = false; // Diagnostic overlay toggle
     this.tileColorMode = false; // Diagnostic colouring toggle
+    this.rootTileIds = new Set();
     this._tickLock = false;
     this._tickPending = false;
   }
 
   async init(manifestUrl) {
     try {
+      this.rootTileIds.clear();
       this.manifest = await (await fetch(manifestUrl)).json();
       for (const t of this.manifest.tiles) {
         this.byId.set(t.tileId, t);
+        if (t.parent == null) {
+          this.rootTileIds.add(t.tileId);
+        }
       }
       // Load root tiles
       for (const t of this.manifest.tiles) {
@@ -151,6 +156,7 @@ class TileManager {
     this._updateFrustum();
     const { want, replaceParents } = this._decide();
 
+    // Ensure roots are always requested
     // Update visibility of already loaded tiles before any load/unload
     for (const [id, rec] of this.tiles) {
       const keepAsFallback = replaceParents.has(id) && this._hasPendingDescendants(id, want);
@@ -417,6 +423,9 @@ class TileManager {
     while (this.cache.size > MAX_TILES || this.cacheBytes > MAX_CACHE_BYTES) {
       let evictCandidate = null;
       for (const key of this.cache.keys()) {
+        if (this.rootTileIds.has(key)) {
+          continue;
+        }
         if (!this.tiles.has(key)) {
           evictCandidate = key;
           break;
@@ -715,7 +724,7 @@ class TileManager {
     }
   }
 
-  lodFolder.add(settings, 'sseRefine', 0.1, 120, 0.1).name('SSE Refine').onChange((value) => {
+  lodFolder.add(settings, 'sseRefine', 0.1, 50, 0.1).name('SSE Refine').onChange((value) => {
     SSE_THRESHOLD_REFINE = value;
     SSE_THRESHOLD_COARSEN = Math.max(0.05, value * 0.5);
     mgr.tick();
@@ -771,3 +780,4 @@ class TileManager {
   // Initialize
   await loadExtractsList();
 })();
+    this.rootTileIds = new Set();
