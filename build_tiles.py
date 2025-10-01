@@ -167,6 +167,56 @@ def load_glb_mesh_primitives(path):
     return meshes
 
 
+def summarize_tile_sizes(sizes, heading="Tile size summary"):
+    if not sizes:
+        print(f"{heading}: no tiles generated")
+        return
+
+    arr = np.asarray(sizes, dtype=np.float64)
+    total_mb = arr.sum() / (1024.0 * 1024.0)
+    min_kb = arr.min() / 1024.0
+    max_kb = arr.max() / 1024.0
+    mean_kb = arr.mean() / 1024.0
+    median_kb = np.median(arr) / 1024.0
+
+    print(f"{heading}: {len(arr)} tiles, total {total_mb:.2f} MB")
+    print(f"  Size (KB) -> min {min_kb:.1f} | median {median_kb:.1f} | mean {mean_kb:.1f} | max {max_kb:.1f}")
+
+    percentiles = [50, 75, 90, 95, 99]
+    pct_values = np.percentile(arr, percentiles)
+    pct_str = ", ".join(f"p{p}: {v/1024.0:.1f} KB" for p, v in zip(percentiles, pct_values))
+    print(f"  Percentiles -> {pct_str}")
+
+    bins_kb = [0, 25, 50, 75, 100, 150, 200, 300, 500, np.inf]
+    labels = ["<25", "25-50", "50-75", "75-100", "100-150", "150-200", "200-300", "300-500", ">500"]
+    hist, _ = np.histogram(arr / 1024.0, bins=bins_kb)
+    print("  Histogram (KB):")
+    for label, count in zip(labels, hist):
+        print(f"    {label}: {int(count)}")
+
+
+def summarize_tile_sizes_by_depth(depth_sizes, heading="Per-depth tile stats", small_threshold_kb=25.0):
+    if not depth_sizes:
+        return
+
+    buckets = {}
+    for z, size in depth_sizes:
+        buckets.setdefault(z, []).append(size)
+
+    print(heading + ":")
+    for z in sorted(buckets.keys()):
+        arr = np.asarray(buckets[z], dtype=np.float64)
+        count = len(arr)
+        mean_kb = arr.mean() / 1024.0
+        min_kb = arr.min() / 1024.0
+        max_kb = arr.max() / 1024.0
+        small_frac = (arr / 1024.0 < small_threshold_kb).sum() / count * 100.0
+        print(
+            f"  z={z}: count {count:5d}, mean {mean_kb:6.1f} KB, min {min_kb:5.1f} KB, max {max_kb:6.1f} KB, "
+            f"small (<{small_threshold_kb:.0f} KB): {small_frac:5.1f}%"
+        )
+
+
 def tri_areas(verts, idx):
     """Calculate area of each triangle"""
     a = verts[idx[0::3]]
@@ -495,6 +545,7 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
     }
 
     all_tiles = []
+    depth_size_samples = []
 
     for mesh_idx, entry in enumerate(mesh_entries):
         pos = entry["positions"]
@@ -572,7 +623,10 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                     if not preserve_borders:
                         add_skirts(m, skirt_h_ratio=0.10)
                     write_glb_from_trimesh(m, meta, out_path)
-                    mesh_tiles[tid] = {**meta, "url": f"/tiles/{extract}/{time_index}/mesh_{mesh_idx}/{z}/{x}/{y}.glb"}
+                    actual_bytes = os.path.getsize(out_path)
+                    depth_size_samples.append((z, actual_bytes))
+                    mesh_tiles[tid] = {**meta, "actualBytes": int(actual_bytes),
+                                       "url": f"/tiles/{extract}/{time_index}/mesh_{mesh_idx}/{z}/{x}/{y}.glb"}
 
         all_tiles.extend(mesh_tiles.values())
 
@@ -585,6 +639,9 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
         json.dump(manifest, f, indent=2)
 
     print(f"Generated {len(all_tiles)} UV-quadtree tiles across {len(mesh_entries)} mesh charts")
+    size_only = [size for (_, size) in depth_size_samples]
+    summarize_tile_sizes(size_only, heading=f"Tile sizes for '{extract}' (uv)")
+    summarize_tile_sizes_by_depth(depth_size_samples, heading="  Depth breakdown")
 
 # ============================================================================
 # World-Space Octree Mode
@@ -674,6 +731,7 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
     }
 
     tiles_meta = {}
+    depth_size_samples = []
 
     for z in range(0, max_depth+1):
         div = 1<<z
@@ -737,7 +795,10 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                     if not preserve_borders:
                         add_skirts(m, skirt_h_ratio=0.10)
                     write_glb_from_trimesh(m, meta, out_path)
-                    tiles_meta[tid] = {**meta, "url": f"/tiles/{extract}/{time_index}/{z}/{i}/{j}/{k}.glb"}
+                    actual_bytes = os.path.getsize(out_path)
+                    depth_size_samples.append((z, actual_bytes))
+                    tiles_meta[tid] = {**meta, "actualBytes": int(actual_bytes),
+                                       "url": f"/tiles/{extract}/{time_index}/{z}/{i}/{j}/{k}.glb"}
 
     def keyz(tid):
         return tuple(map(int, tid.split('/')))
@@ -751,6 +812,9 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
         json.dump(manifest, f, indent=2)
 
     print(f"Generated {len(tiles_meta)} world-octree tiles")
+    size_only = [size for (_, size) in depth_size_samples]
+    summarize_tile_sizes(size_only, heading=f"Tile sizes for '{extract}' (world)")
+    summarize_tile_sizes_by_depth(depth_size_samples, heading="  Depth breakdown")
 
 # ============================================================================
 # Crack Prevention: Skirts & Border Snapping

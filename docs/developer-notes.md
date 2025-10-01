@@ -33,8 +33,8 @@ This document explains how the tiler and viewer work under the hood. It dives in
 | 3. Manifest stub | Initialise manifest header with `charts` = number of primitives. |
 | 4. Per-mesh tile loop | For each mesh: <br> • Precompute triangle areas (`tri_areas`) and UV centroids (`uv_centroids`). <br> • Iterate `z` from `max_depth` down to 0. For each (x, y) tile compute bounding box `b` = `uv_tile_bounds`. <br> • Build triangle mask (`uv_in_tile`) and create subset via `subset_trimesh`. <br> • If `preserve_borders`, capture boundary vertex positions (`compute_border_edges`). |
 | 5. Decimation & seams | • Run `decimate_to_target`. <br> • If `preserve_borders`, call `snap_decimated_border` with absolute (`snap_radius`) or relative (`snap_ratio * diag`) tolerance. <br> • Else, add skirts via `add_skirts` (10% of mean edge length). |
-| 6. Output | Write tile GLB under `mesh_<idx>/<z>/<x>/<y>.glb`. Construct tile metadata (AABB, UV bounds, `children`, SSE info) and accumulate for manifest. |
-| 7. Finalise manifest | Sort tiles by `(mesh, z, x, y)` and write `manifest_<time>.json`. |
+| 6. Output | Write tile GLB under `mesh_<idx>/<z>/<x>/<y>.glb`. Record both `approxBytes` (estimate) and the real file size (`actualBytes`) in manifest entries. |
+| 7. Finalise manifest & stats | Sort tiles by `(mesh, z, x, y)` and write `manifest_<time>.json`. Afterwards `summarize_tile_sizes` prints min/mean/median/max, percentiles, and a KB histogram. `summarize_tile_sizes_by_depth` also reports per-depth stats and highlights the fraction of tiles under 25 KB so you can detect overly deep refinements. |
 
 ### 1.4. `build_world_octree`
 

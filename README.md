@@ -54,6 +54,8 @@ python3 build_tiles.py \
   --split_meshes
 ```
 
+Each run prints a size histogram (min/median/max, percentiles, KB buckets) plus a per-depth breakdown highlighting the share of tiles under 25 KB—handy for catching overly aggressive depth settings.
+
 #### World-Space Octree mode (no UVs required):
 ```bash
 python3 build_tiles.py \
