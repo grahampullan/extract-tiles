@@ -11,7 +11,7 @@ A multi-resolution tiling system for visualizing large triangulated mesh surface
 - **Crack prevention**: Includes overlap margins, optional skirt generation, and border snapping with configurable tolerances.
 - **Dynamic LOD**: Screen-space-error refinement with hysteresis plus queue throttling to keep loads responsive.
 - **Time-series aware**: Discovers available extracts/timesteps, prefetches neighbouring manifests/tiles, and auto-picks a slider or dropdown based on timestep count.
-- **HUD & diagnostics**: Live overlay for SSE thresholds/tile counts/cache size, wireframe toggle, per-tile bounding boxes, and colour-debug mode.
+- **HUD & diagnostics**: Live overlay for SSE thresholds/tile counts/cache size, wireframe toggle, per-tile bounding boxes, tile-colour debug mode, and a camera-aligned lambert shading option.
 - **Efficient streaming**: Fastify server with compression and caching.
 - **Interactive viewers**:
   - Single-extract viewer with dat.GUI controls for dataset/time selection, LOD tuning, diagnostics, and HUD indicators.
@@ -194,6 +194,7 @@ Each GLB tile includes metadata in `mesh.extras`:
   - **Wireframe**: Toggle mesh rendering between solid and wireframe
   - **Bounding Boxes**: Overlay each tile's world-space bounding box while keeping the surface visible
   - **Tile Colours**: Replace surface shading with a unique colour per tile to visualise current LOD coverage
+  - **Simple Shading**: Swap to a lambert material (optionally using vertex colours) for a softer lit appearance; combines the viewer’s ambient fill with a directional light mounted to the camera so highlights track your orbit
 
 ## Performance Tuning
 

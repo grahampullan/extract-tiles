@@ -70,7 +70,8 @@ Quick summary (mostly unchanged):
 * `loader` – `GLTFLoader` instance.
 * `byId`, `tiles`, `cache` – manifest lookup, active tiles, and cached tiles (LRU style, default cap 500 tiles / ~600 MB).
 * `queue`, `inflight` – track pending/active loads.
-* Diagnostics toggles: `wireframeMode`, `showBoundingBoxes`, `tileColorMode`.
+* Diagnostics toggles: `wireframeMode`, `showBoundingBoxes`, `tileColorMode`, `simpleShadingMode`.
+* Lighting: ambient fill plus a directional light parented to the camera so the simple-shading option stays evenly lit as the user orbits.
 * `rootTileIds` – set of `tileId`s whose `parent` is `null`. Roots are kept in the cache (eviction skips them) so they can be reinstated quickly, but they are only visible when the LOD logic needs them as a fallback.
 * `_hasPendingDescendants(tileId, wantSet)` – helper used during LOD transitions to keep a parent visible while any wanted descendants are still loading.
 * `_tickLock`, `_tickPending` – ensure the async tick loop doesn’t overlap.
@@ -159,12 +160,14 @@ const settings = {
   - Wireframe: sets `material.wireframe` for all meshes in `tiles` and `cache`.
   - Bounding boxes: adds/removes helpers only for active tiles. `updateBoundingBoxVisibility` ensures cached helpers are detached.
   - Tile colours: `_applyTileColor` swaps shading for active tiles using a per-mesh random HSL tint; `_restoreTileMaterial` returns to the stored material when turned off.
+  - Simple shading: `_applySimpleShading` switches meshes to a cached `MeshLambertMaterial` (respecting vertex colours) for softer lighting; turning it off restores or reapplies tile colours as needed.
 
 ### 3.5. Extract Selection & Prefetching
 
 * `loadExtractsList` hits `/api/extracts`, caches the response, rebuilds the GUI controls, and triggers an initial manifest load. Errors fall back to the default extract/time pair.
 * `rebuildTimeController` chooses between a discrete dropdown (many timesteps) and a slider (<=100). The slider stores a numeric `timeIndex` so dat.gui can emit integers even though `settings.time` remains stringified for URL construction.
 * `schedulePrefetchNeighbours` determines adjacent timesteps (+/-1, +/-2) and calls `prefetchRootTiles`, which fetches the neighbour manifest and root tile GLBs ahead of time. Prefetched ArrayBuffers live in `prefetchedTileBuffers`, letting `_load` short circuit straight into `GLTFLoader.parse` without another HTTP transfer.
+* Diagnostics interplay: enabling tile colours or simple shading automatically disables the other mode and re-applies the relevant material override to all loaded tiles.
 
 ---
 

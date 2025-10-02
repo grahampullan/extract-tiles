@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import math
+import base64
 import argparse
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
@@ -30,24 +31,147 @@ MAX_DEPTH         = 5
 # Shared Utilities
 # ============================================================================
 
-def load_glb_arrays(path):
-    """Load GLB file and extract arrays for vertices, UVs, colors, and indices.
-    Now supports **all** meshes/primitives instead of only the first.
-    """
-    gltf = GLTF2().load_binary(path)
-    blob = gltf.binary_blob()
+def _load_gltf_with_buffers(path: str):
+    """Load a glTF/GLB file and return (GLTF2, list[bytes])."""
+    src = Path(path)
+    suffix = src.suffix.lower()
+
+    if suffix == ".glb":
+        gltf = GLTF2().load_binary(path)
+        blob = gltf.binary_blob()
+        buffers: List[bytes] = []
+        cursor = 0
+        if gltf.buffers:
+            for buf in gltf.buffers:
+                length = buf.byteLength or 0
+                buffers.append(blob[cursor:cursor+length])
+                cursor += length
+        else:
+            buffers.append(blob)
+        return gltf, buffers
+
+    if suffix == ".gltf":
+        gltf = GLTF2().load(path)
+        base_dir = src.parent
+        buffers = []
+        for idx, buf in enumerate(gltf.buffers or []):
+            uri = buf.uri
+            if not uri:
+                raise ValueError(f"Buffer {idx} in '{path}' has no URI; embed data or convert to GLB.")
+            if uri.startswith("data:"):
+                _, data = uri.split(",", 1)
+                buffers.append(base64.b64decode(data))
+            else:
+                buf_path = base_dir / uri
+                if not buf_path.exists():
+                    raise FileNotFoundError(f"Referenced buffer '{uri}' not found relative to '{path}'.")
+                buffers.append(buf_path.read_bytes())
+        return gltf, buffers
+
+    raise ValueError(f"Unsupported file extension '{suffix}' for '{path}'. Expected .gltf or .glb")
+
+
+def _make_accessor_reader(gltf: GLTF2, buffers: List[bytes]):
+    comps = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT3": 9, "MAT4": 16}
+    types = {
+        5120: np.int8,
+        5121: np.uint8,
+        5122: np.int16,
+        5123: np.uint16,
+        5125: np.uint32,
+        5126: np.float32,
+    }
 
     def to_np(acc_idx):
         if acc_idx is None:
             return None
         acc = gltf.accessors[acc_idx]
-        bv = gltf.bufferViews[acc.bufferView]
-        start = (bv.byteOffset or 0) + (acc.byteOffset or 0)
-        ncomp = {"SCALAR":1,"VEC2":2,"VEC3":3,"VEC4":4}[acc.type]
-        ct2dt = {5126:np.float32, 5125:np.uint32, 5123:np.uint16, 5121:np.uint8}
-        dt = ct2dt[acc.componentType]
-        arr = np.frombuffer(blob, dtype=dt, count=acc.count*ncomp, offset=start)
-        return arr.reshape(acc.count, ncomp)
+        if acc.bufferView is None:
+            raise ValueError("Sparse accessors are not supported.")
+        view = gltf.bufferViews[acc.bufferView]
+        buf_idx = view.buffer
+        if buf_idx is None or buf_idx >= len(buffers):
+            raise ValueError(f"Buffer index {buf_idx} out of range for accessor {acc_idx}.")
+        buf_bytes = buffers[buf_idx]
+        if buf_bytes is None:
+            raise ValueError(f"Buffer {buf_idx} has no data loaded.")
+
+        ncomp = comps[acc.type]
+        dtype = types[acc.componentType]
+        comp_size = np.dtype(dtype).itemsize
+        offset = (view.byteOffset or 0) + (acc.byteOffset or 0)
+        stride = view.byteStride or 0
+        mv = memoryview(buf_bytes)
+
+        if stride and stride != comp_size * ncomp:
+            span = stride * acc.count
+            raw = mv[offset:offset + span]
+            arr = np.ndarray((acc.count, ncomp), dtype=dtype, buffer=raw, strides=(stride, comp_size))
+            return np.array(arr, copy=True)
+
+        length = acc.count * ncomp
+        raw = mv[offset:offset + length * comp_size]
+        arr = np.frombuffer(raw, dtype=dtype, count=length)
+        return arr.reshape(acc.count, ncomp).copy()
+
+    return to_np
+
+
+def _triangulate_indices(raw_idx: Optional[np.ndarray], mode: Optional[int], vertex_count: int) -> np.ndarray:
+    """Return flattened triangle indices for the given primitive."""
+    mode = 4 if mode is None else mode
+
+    def ensure_base() -> np.ndarray:
+        if raw_idx is not None:
+            return raw_idx.astype(np.uint32).reshape(-1)
+        base = np.arange(vertex_count, dtype=np.uint32)
+        return base
+
+    if mode == 4:  # TRIANGLES
+        base = ensure_base()
+        if base.size % 3 != 0:
+            raise ValueError(f"Triangle primitive has {base.size} indices (not divisible by 3).")
+        return base
+
+    if mode == 5:  # TRIANGLE_STRIP
+        base = ensure_base()
+        if base.size < 3:
+            return np.empty(0, dtype=np.uint32)
+        tris: List[int] = []
+        flip = False
+        for i in range(base.size - 2):
+            a, b, c = base[i], base[i + 1], base[i + 2]
+            if a == b or b == c or a == c:
+                flip = not flip
+                continue
+            if flip:
+                tris.extend([b, a, c])
+            else:
+                tris.extend([a, b, c])
+            flip = not flip
+        return np.asarray(tris, dtype=np.uint32)
+
+    if mode == 6:  # TRIANGLE_FAN
+        base = ensure_base()
+        if base.size < 3:
+            return np.empty(0, dtype=np.uint32)
+        origin = base[0]
+        tris: List[int] = []
+        for i in range(1, base.size - 1):
+            a, b = base[i], base[i + 1]
+            if origin == a or a == b or origin == b:
+                continue
+            tris.extend([origin, a, b])
+        return np.asarray(tris, dtype=np.uint32)
+
+    # Unsupported primitive type (points/lines). Skip.
+    return np.empty(0, dtype=np.uint32)
+
+
+def load_glb_arrays(path):
+    """Load GLB/GLTF file and extract arrays for vertices, UVs, colors, and indices."""
+    gltf, buffers = _load_gltf_with_buffers(path)
+    to_np = _make_accessor_reader(gltf, buffers)
 
     all_pos = []
     all_uv  = []
@@ -58,12 +182,15 @@ def load_glb_arrays(path):
     # Iterate all meshes/primitives
     for mesh in (gltf.meshes or []):
         for prim in (mesh.primitives or []):
-            pos = to_np(prim.attributes.POSITION).astype(np.float32)
-            idx = to_np(prim.indices)
-            if idx is None:
-                # build a trivial index if missing
-                idx = np.arange(len(pos), dtype=np.uint32).reshape(-1,1)
-            idx = idx.astype(np.uint32).reshape(-1) + np.uint32(v_offset)
+            pos = to_np(prim.attributes.POSITION)
+            if pos is None or pos.size == 0:
+                continue
+            pos = pos.astype(np.float32)
+
+            tri_idx = _triangulate_indices(to_np(prim.indices), prim.mode, len(pos))
+            if tri_idx.size == 0:
+                continue
+            idx = tri_idx + np.uint32(v_offset)
 
             # Optional attributes
             uv = None
@@ -90,11 +217,10 @@ def load_glb_arrays(path):
             if uv is not None:   all_uv.append(uv)
             if col is not None:  all_col.append(col)
             all_idx.append(idx)
-
             v_offset += pos.shape[0]
 
     if not all_pos:
-        raise RuntimeError("No meshes/primitives found in GLB.")
+        raise RuntimeError("No meshes/primitives found in GLB/GLTF source.")
 
     pos = np.vstack(all_pos).astype(np.float32)
     idx = np.concatenate(all_idx).astype(np.uint32)
@@ -107,21 +233,9 @@ def load_glb_arrays(path):
 
 
 def load_glb_mesh_primitives(path):
-    """Load GLB and return per-primitive arrays (positions, uv, colors, indices)."""
-    gltf = GLTF2().load_binary(path)
-    blob = gltf.binary_blob()
-
-    def to_np(acc_idx):
-        if acc_idx is None:
-            return None
-        acc = gltf.accessors[acc_idx]
-        bv = gltf.bufferViews[acc.bufferView]
-        start = (bv.byteOffset or 0) + (acc.byteOffset or 0)
-        ncomp = {"SCALAR":1,"VEC2":2,"VEC3":3,"VEC4":4}[acc.type]
-        ct2dt = {5126:np.float32, 5125:np.uint32, 5123:np.uint16, 5121:np.uint8}
-        dt = ct2dt[acc.componentType]
-        arr = np.frombuffer(blob, dtype=dt, count=acc.count*ncomp, offset=start)
-        return arr.reshape(acc.count, ncomp)
+    """Load GLB/GLTF and return per-primitive arrays (positions, uv, colors, indices)."""
+    gltf, buffers = _load_gltf_with_buffers(path)
+    to_np = _make_accessor_reader(gltf, buffers)
 
     meshes = []
     for mesh_idx, mesh in enumerate(gltf.meshes or []):
@@ -131,10 +245,9 @@ def load_glb_mesh_primitives(path):
                 continue
             pos = pos.astype(np.float32)
 
-            idx = to_np(prim.indices)
-            if idx is None:
-                idx = np.arange(len(pos), dtype=np.uint32).reshape(-1, 1)
-            idx = idx.astype(np.uint32).reshape(-1)
+            tri_idx = _triangulate_indices(to_np(prim.indices), prim.mode, len(pos))
+            if tri_idx.size == 0:
+                continue
 
             uv = None
             if hasattr(prim.attributes, 'TEXCOORD_0') and prim.attributes.TEXCOORD_0 is not None:
@@ -160,7 +273,7 @@ def load_glb_mesh_primitives(path):
                 "name": mesh.name or f"mesh{mesh_idx}",
                 "primitive": prim_idx,
                 "positions": pos,
-                "indices": idx,
+                "indices": tri_idx.astype(np.uint32),
                 "uv": uv,
                 "colors": col,
             })
