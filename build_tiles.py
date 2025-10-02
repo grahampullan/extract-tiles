@@ -9,6 +9,7 @@ import os
 import pathlib
 import math
 import argparse
+from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 import numpy as np
 import trimesh as tm
@@ -926,7 +927,8 @@ def snap_decimated_border(decimated: tm.Trimesh, original_border_pts: np.ndarray
 
 def main():
     parser = argparse.ArgumentParser(description='Build multi-resolution tiles from GLB')
-    parser.add_argument('--in_glb', required=True, help='Input GLB file path')
+    parser.add_argument('--in_glb', help='Input GLB file path')
+    parser.add_argument('--input_dir', help='Directory containing GLB snapshots (time steps)')
     parser.add_argument('--out_dir', default='tiles_out', help='Output directory')
     parser.add_argument('--extract', default='default', help='Extract name')
     parser.add_argument('--time', type=int, default=0, help='Time index')
@@ -944,7 +946,19 @@ def main():
     parser.add_argument('--snap_ratio', type=float, default=1e-3,
                        help='Relative snap tolerance as a fraction of tile diagonal (set 0 to disable)')
 
+    parser.add_argument('--snapshots', action='store_true',
+                        help='Process all GLB files in --input_dir as sequential time steps')
+
     args = parser.parse_args()
+
+    if args.snapshots:
+        if args.input_dir is None:
+            raise ValueError('--snapshots requires --input_dir')
+        if args.in_glb:
+            raise ValueError('Specify either --in_glb or --snapshots/--input_dir, not both.')
+    else:
+        if not args.in_glb:
+            raise ValueError('Must provide --in_glb unless using --snapshots with --input_dir')
 
     target_bytes = int(args.target_kb * 1024)
 
@@ -957,25 +971,40 @@ def main():
     if args.preserve_borders and snap_radius is None and snap_ratio is None:
         snap_ratio = 1e-3  # default relative tolerance
 
-    if args.tiling_space == 'uv':
-        build_uv_quadtree(
-            args.in_glb, args.out_dir, args.extract, args.time,
-            args.max_depth, target_bytes,
-            split_meshes=args.split_meshes,
-            preserve_borders=args.preserve_borders,
-            snap_radius=snap_radius,
-            snap_ratio=snap_ratio
-        )
-    else:  # world
-        if args.split_meshes:
-            raise ValueError('--split_meshes is only supported for uv tiling space')
-        build_world_octree(
-            args.in_glb, args.out_dir, args.extract, args.time,
-            args.max_depth, target_bytes,
-            preserve_borders=args.preserve_borders,
-            snap_radius=snap_radius,
-            snap_ratio=snap_ratio
-        )
+    def process_single(glb_path: str, time_idx: int):
+        if args.tiling_space == 'uv':
+            build_uv_quadtree(
+                glb_path, args.out_dir, args.extract, time_idx,
+                args.max_depth, target_bytes,
+                split_meshes=args.split_meshes,
+                preserve_borders=args.preserve_borders,
+                snap_radius=snap_radius,
+                snap_ratio=snap_ratio
+            )
+        else:
+            if args.split_meshes:
+                raise ValueError('--split_meshes is only supported for uv tiling space')
+            build_world_octree(
+                glb_path, args.out_dir, args.extract, time_idx,
+                args.max_depth, target_bytes,
+                preserve_borders=args.preserve_borders,
+                snap_radius=snap_radius,
+                snap_ratio=snap_ratio
+            )
+
+    if args.snapshots:
+        input_dir = Path(args.input_dir)
+        if not input_dir.exists() or not input_dir.is_dir():
+            raise ValueError(f"Input directory '{input_dir}' does not exist or is not a directory")
+        glb_files = sorted(p for p in input_dir.glob('*.glb'))
+        if not glb_files:
+            raise ValueError(f"No .glb files found in '{input_dir}'")
+        for offset, glb_path in enumerate(glb_files):
+            time_idx = args.time + offset
+            print(f"Processing snapshot {glb_path.name} (time={time_idx})")
+            process_single(str(glb_path), time_idx)
+    else:
+        process_single(args.in_glb, args.time)
 
 if __name__ == '__main__':
     main()

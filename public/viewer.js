@@ -35,12 +35,18 @@ class TileManager {
     this.rootTileIds = new Set();
     this._tickLock = false;
     this._tickPending = false;
+    this.manifestVersion = 0;
   }
 
   async init(manifestUrl) {
+    const version = ++this.manifestVersion;
+    this.rootTileIds.clear();
     try {
-      this.rootTileIds.clear();
-      this.manifest = await (await fetch(manifestUrl)).json();
+      const manifest = await (await fetch(manifestUrl)).json();
+      if (version !== this.manifestVersion) {
+        return;
+      }
+      this.manifest = manifest;
       for (const t of this.manifest.tiles) {
         this.byId.set(t.tileId, t);
         if (t.parent == null) {
@@ -152,9 +158,11 @@ class TileManager {
 
   async _tickOnce() {
     if (!this.manifest) return;
+    const versionAtStart = this.manifestVersion;
 
     this._updateFrustum();
     const { want, replaceParents } = this._decide();
+    if (versionAtStart !== this.manifestVersion) return;
 
     // Ensure roots are always requested
     // Update visibility of already loaded tiles before any load/unload
@@ -168,7 +176,14 @@ class TileManager {
     }
 
     // Queue tiles we need but don't have
+    const rootIds = [...this.rootTileIds];
+    for (const id of rootIds) {
+      if (want.has(id) && !this.tiles.has(id)) {
+        this._enqueue(id);
+      }
+    }
     for (const id of want) {
+      if (this.rootTileIds.has(id)) continue;
       if (!this.tiles.has(id)) {
         this._enqueue(id);
       }
@@ -178,6 +193,7 @@ class TileManager {
     if (this.queue.length) {
       this.queue = this.queue.filter(id => want.has(id));
     }
+    if (versionAtStart !== this.manifestVersion) return;
 
     // Unload tiles we have but don't need
     for (const [id, rec] of [...this.tiles]) {
@@ -200,6 +216,7 @@ class TileManager {
       if (launched.length) {
         this._setLoadingIndicator(true);
         const loaded = await Promise.all(launched);
+        if (versionAtStart !== this.manifestVersion) return;
         // Hide freshly loaded tiles that are no longer needed
         for (const rec of loaded) {
           if (!rec) continue;
@@ -222,6 +239,7 @@ class TileManager {
     this.hudCache.textContent = `${this.cache.size}`;
 
     this.updateBoundingBoxVisibility();
+    if (versionAtStart !== this.manifestVersion) return;
 
     this._setLoadingIndicator(this.inflight > 0 || this.queue.length > 0);
   }
@@ -287,21 +305,41 @@ class TileManager {
     const meta = this.byId.get(id);
     if (!meta) return null;
 
+    const versionAtStart = this.manifestVersion;
     this.inflight++;
     let rec = null;
     try {
-      const glb = await this.loader.loadAsync(meta.url);
+      let glb;
+      const prefetched = prefetchedTileBuffers.get(meta.url);
+      if (prefetched) {
+        prefetchedTileBuffers.delete(meta.url);
+        glb = await new Promise((resolve, reject) => {
+          this.loader.parse(prefetched.slice(0), '', resolve, reject);
+        });
+      } else {
+        glb = await this.loader.loadAsync(meta.url);
+      }
+      if (versionAtStart !== this.manifestVersion) {
+        glb.scene.traverse(o => {
+          if (o.isMesh) {
+            o.geometry?.dispose();
+            if (o.material) {
+              if (o.material.map) o.material.map.dispose();
+              o.material.dispose?.();
+            }
+          }
+        });
+        return null;
+      }
       const obj = glb.scene;
       obj.userData.tileId = id;
-
-      const fadeInEnabled = !this.wireframeMode;
 
       obj.traverse(o => {
         if (o.isMesh && o.material) {
           const newMaterial = new THREE.MeshStandardMaterial({
             vertexColors: true,
-            transparent: fadeInEnabled,
-            opacity: fadeInEnabled ? 0.0 : 1.0,
+            transparent: false,
+            opacity: 1.0,
             wireframe: this.wireframeMode,
             side: THREE.DoubleSide
           });
@@ -324,8 +362,8 @@ class TileManager {
             o.material = new THREE.MeshStandardMaterial({
               color: new THREE.Color().setHSL(Math.random(), 0.8, 0.6),
               vertexColors: false,
-              transparent: fadeInEnabled,
-              opacity: fadeInEnabled ? 0.0 : 1.0,
+              transparent: false,
+              opacity: 1.0,
               wireframe: this.wireframeMode,
               side: THREE.DoubleSide
             });
@@ -345,37 +383,6 @@ class TileManager {
         bboxHelper.visible = false;
       }
 
-      if (fadeInEnabled) {
-        const start = performance.now();
-        const dur = 180;
-        const animate = () => {
-          const t = Math.min(1, (performance.now() - start) / dur);
-          obj.traverse(o => {
-            if (o.isMesh && o.material) {
-              o.material.opacity = 0.2 + 0.8 * t;
-            }
-          });
-          if (t < 1) {
-            requestAnimationFrame(animate);
-          } else {
-            obj.traverse(o => {
-              if (o.isMesh && o.material) {
-                o.material.transparent = false;
-                o.material.opacity = 1.0;
-              }
-            });
-          }
-        };
-        animate();
-      } else {
-        obj.traverse(o => {
-          if (o.isMesh && o.material) {
-            o.material.transparent = false;
-            o.material.opacity = 1.0;
-          }
-        });
-      }
-
       rec = { obj3d: obj, meta, bboxHelper };
       this.tiles.set(id, rec);
       this._cacheInsert(id, rec);
@@ -385,9 +392,17 @@ class TileManager {
       }
     } catch (e) {
       console.error("Tile load failed", id, e);
+    } finally {
+      this.inflight--;
     }
 
-    this.inflight--;
+    if (versionAtStart !== this.manifestVersion) {
+      if (rec) {
+        this._unload(id);
+      }
+      return null;
+    }
+
     return rec;
   }
 
@@ -542,6 +557,8 @@ class TileManager {
   }
 
   clear() {
+    this.manifestVersion += 1;
+    this.rootTileIds.clear();
     // Unload all tiles
     for (const [, rec] of this.tiles) {
       this.scene.remove(rec.obj3d);
@@ -577,6 +594,50 @@ class TileManager {
     this.queue = [];
     this.manifest = null;
     this.byId.clear();
+  }
+}
+
+const prefetchedTileBuffers = new Map();
+const prefetchInFlight = new Set();
+
+async function prefetchRootTiles(extract, time) {
+  const key = `${extract}:${time}`;
+  if (prefetchInFlight.has(key)) return;
+  prefetchInFlight.add(key);
+  try {
+    const resp = await fetch(`/manifest/${extract}/${time}.json`);
+    if (!resp.ok) return;
+    const manifest = await resp.json();
+    const roots = (manifest.tiles || []).filter(t => t.z === 0);
+    await Promise.all(roots.map(async (tile) => {
+      if (!tile.url || prefetchedTileBuffers.has(tile.url)) return;
+      try {
+        const res = await fetch(tile.url);
+        if (!res.ok) return;
+        const buffer = await res.arrayBuffer();
+        prefetchedTileBuffers.set(tile.url, buffer);
+      } catch (err) {
+        console.warn('Prefetch tile failed', tile.url, err);
+      }
+    }));
+  } catch (err) {
+    console.warn('Prefetch manifest failed', extract, time, err);
+  } finally {
+    prefetchInFlight.delete(key);
+  }
+}
+
+function schedulePrefetchNeighbours(settings, extractsCache) {
+  const selected = extractsCache.find(e => e.name === settings.extract);
+  if (!selected || !selected.times || !selected.times.length) return;
+  const times = selected.times.slice().sort((a, b) => a - b);
+  const current = Number(settings.time);
+  const offsets = [1, 2, -1, -2];
+  for (const offset of offsets) {
+    const target = current + offset;
+    if (times.includes(target)) {
+      prefetchRootTiles(settings.extract, target);
+    }
   }
 }
 
@@ -627,6 +688,7 @@ class TileManager {
 
   let extractController = null;
   let timeController = null;
+  let timeIsSlider = false;
   let extractsCache = [];
 
   function applyWireframe(wireframe) {
@@ -674,24 +736,37 @@ class TileManager {
   function rebuildTimeController() {
     if (timeController) {
       datasetFolder.remove(timeController);
+      timeController = null;
     }
 
     const selected = extractsCache.find(e => e.name === settings.extract);
-    const times = selected && selected.times && selected.times.length
-      ? selected.times.map(t => t.toString())
-      : ['0'];
+    const times = selected && selected.times && selected.times.length ? selected.times : [0];
 
-    if (!times.includes(settings.time)) {
-      settings.time = times[0];
+    if (!times.includes(Number(settings.time))) {
+      settings.time = String(times[0]);
     }
 
-    timeController = datasetFolder.add(settings, 'time', times);
-    timeController.name('Time');
-    timeController.onChange((value) => {
-      settings.time = value;
-      loadManifest();
-    });
-    timeController.updateDisplay?.();
+    const useSlider = times.length > 1 && times.length <= 100;
+    timeIsSlider = useSlider;
+    if (useSlider) {
+      const min = Math.min(...times);
+      const max = Math.max(...times);
+      settings.timeIndex = Number(settings.time);
+      timeController = datasetFolder.add(settings, 'timeIndex', min, max, 1).name('Time');
+      timeController.onChange((value) => {
+        settings.time = String(Math.round(value));
+        loadManifest();
+      });
+      timeController.updateDisplay?.();
+    } else {
+      const timeStrings = times.map(t => t.toString());
+      timeController = datasetFolder.add(settings, 'time', timeStrings).name('Time');
+      timeController.onChange((value) => {
+        settings.time = value;
+        loadManifest();
+      });
+      timeController.updateDisplay?.();
+    }
   }
 
   async function loadManifest() {
@@ -703,6 +778,7 @@ class TileManager {
     applyWireframe(settings.wireframe);
     mgr.updateBoundingBoxVisibility();
     await mgr.tick();
+    schedulePrefetchNeighbours(settings, extractsCache);
   }
 
   async function loadExtractsList() {
