@@ -46,9 +46,9 @@ Similar structure but partitions using world-space AABBs instead of UV quads. Ke
 
 ### 1.5. CLI (`main`)
 
-* Builds the `argparse` parser with shared flags. Notable options: `--tiling_space`, `--split_meshes`, `--preserve_borders`, `--snap_radius`, `--snap_ratio`.
-* Calculates `target_bytes` = KB × 1024.
-* Dispatches to UV or world builder. Throws if `--split_meshes` is used with world mode.
+* Builds the `argparse` parser with shared flags. Notable options now include `--tiling_space`, `--split_meshes`, `--preserve_borders`, `--snap_radius`, `--snap_ratio`, plus snapshot helpers `--snapshots` and `--input_dir` (process sequential time steps) alongside the direct `--in_glb` path.
+* Normalises sizes (`target_bytes` = KB × 1024) and validates snap tolerances (`--snap_ratio`, `--snap_radius`). If `--preserve_borders` is enabled without an explicit tolerance the code falls back to a default `snap_ratio` of `1e-3`.
+* Dispatches to UV or world builder through an inner `process_single`. When `--snapshots` is set it sorts all `*.glb` files in the input directory, increments `time` per file, and invokes `process_single` for each. World-space tiling still rejects `--split_meshes`.
 
 ---
 
@@ -68,12 +68,14 @@ Quick summary (mostly unchanged):
 `TileManager` is the core orchestrator. Important members:
 
 * `loader` – `GLTFLoader` instance.
-* `byId`, `tiles`, `cache` – manifest lookup, active tiles, and cached tiles (LRU style, default cap 500 tiles / ~600 MB).
+* `byId`, `tiles`, `cache` – manifest lookup, active tiles, and cached tiles (LRU style, default cap 500 tiles / ~600 MB).
 * `queue`, `inflight` – track pending/active loads.
 * Diagnostics toggles: `wireframeMode`, `showBoundingBoxes`, `tileColorMode`.
 * `rootTileIds` – set of `tileId`s whose `parent` is `null`. Roots are kept in the cache (eviction skips them) so they can be reinstated quickly, but they are only visible when the LOD logic needs them as a fallback.
 * `_hasPendingDescendants(tileId, wantSet)` – helper used during LOD transitions to keep a parent visible while any wanted descendants are still loading.
 * `_tickLock`, `_tickPending` – ensure the async tick loop doesn’t overlap.
+* HUD wiring: `hudLOD`, `hudTiles`, `hudCache`, and `loadingIndicator` update the overlay counters/spinner each tick.
+* Threshold/budget globals: `SSE_THRESHOLD_REFINE`/`COARSEN`, `MAX_CONCURRENT`, `MAX_TILES`, `MAX_CACHE_BYTES` govern LOD, request concurrency, and cache eviction.
 
 ### 3.2. Lifecycle
 
@@ -91,9 +93,9 @@ Quick summary (mostly unchanged):
 
 * Asynchronously load GLB with `GLTFLoader`. Each mesh gets:
   - A fresh `MeshStandardMaterial` (keeps vertex colours) storing debug info for diagnostics.
-  - Optional UV/colour rebuilding for fallbacks.
+  - Cached vertex colour attributes so diagnostics can restore them later.
+* Consume any prefetched binary payload from `prefetchedTileBuffers` before falling back to `loader.loadAsync` (saves a round-trip when neighbour prefetch succeeds).
 * Create a `Box3Helper` for bounding boxes.
-* Fade-in animation (180 ms) when not in wireframe mode.
 * Construct `{ obj3d, meta, bboxHelper }` record, add to `tiles`, and call `_cacheInsert`.
 * Apply tile colour override if diagnostic is active.
 * returns the tile record.
@@ -104,6 +106,11 @@ Quick summary (mostly unchanged):
 * Evict oldest inactive entries while the cache exceeds `MAX_TILES` or `MAX_CACHE_BYTES`.
   - The loop now scans keys until it finds one **not** present in `this.tiles`.
   - Evicted mesh resources (geometry/material/helper) are disposed.
+
+#### `clear()`
+
+* Bumps `manifestVersion`, clears `rootTileIds`, detaches every active tile/helper from the scene, and traverses cached meshes to dispose GPU resources.
+* Empties `tiles`, `cache`, and `queue`, zeroes the tracked byte budget, and resets the manifest lookup.
 
 #### `_unload(tileId)`
 
@@ -117,7 +124,7 @@ Quick summary (mostly unchanged):
 
 2. **Frustum & SSE**: `_decide()` calculates which tiles are needed (`want`). It walks the quadtree breadth-first, computing projected SSE and recursing into children when `sse > SSE_THRESHOLD_REFINE`.
 
-3. **Visibility pre-pass**: Toggle visibility (and helper visibility) for all `this.tiles` based on membership in `want`.
+3. **Visibility pre-pass**: Toggle visibility (and helper visibility) for all `this.tiles` based on membership in `want`. Parents that appear in `replaceParents` stay visible while their descendants are still downloading (`_hasPendingDescendants`).
 
 4. **Queue**: Enqueue missing tiles; filter duplicate/stale IDs from `this.queue` so only still-needed tiles remain.
 
@@ -151,7 +158,13 @@ const settings = {
 * **Diagnostics** – toggles wireframe, bounding boxes, and tile colours. Each handler updates active tiles immediately:
   - Wireframe: sets `material.wireframe` for all meshes in `tiles` and `cache`.
   - Bounding boxes: adds/removes helpers only for active tiles. `updateBoundingBoxVisibility` ensures cached helpers are detached.
-  - Tile colours: `_applyTileColor` swaps shading for active tiles; `_restoreTileMaterial` returns to the stored material when turned off.
+  - Tile colours: `_applyTileColor` swaps shading for active tiles using a per-mesh random HSL tint; `_restoreTileMaterial` returns to the stored material when turned off.
+
+### 3.5. Extract Selection & Prefetching
+
+* `loadExtractsList` hits `/api/extracts`, caches the response, rebuilds the GUI controls, and triggers an initial manifest load. Errors fall back to the default extract/time pair.
+* `rebuildTimeController` chooses between a discrete dropdown (many timesteps) and a slider (<=100). The slider stores a numeric `timeIndex` so dat.gui can emit integers even though `settings.time` remains stringified for URL construction.
+* `schedulePrefetchNeighbours` determines adjacent timesteps (+/-1, +/-2) and calls `prefetchRootTiles`, which fetches the neighbour manifest and root tile GLBs ahead of time. Prefetched ArrayBuffers live in `prefetchedTileBuffers`, letting `_load` short circuit straight into `GLTFLoader.parse` without another HTTP transfer.
 
 ---
 

@@ -4,16 +4,18 @@ A multi-resolution tiling system for visualizing large triangulated mesh surface
 
 ## Features
 
-- **Multi-resolution tiles**: Automatically generates LOD tiles from GLB files
+- **Multi-resolution tiles**: Automatically generates LOD tiles from GLB files.
 - **Multiple tiling modes**:
-  - UV-Quadtree: For meshes with texture coordinates
-  - World-Space Octree: For meshes without UVs (e.g., isosurfaces)
-- **Crack prevention**: Includes overlap margins and optional skirt generation
-- **Dynamic LOD**: SSE-based (screen-space error) refinement
-- **Efficient streaming**: Fastify server with compression and caching
+  - UV-Quadtree: For meshes with texture coordinates.
+  - World-Space Octree: For meshes without UVs (e.g., isosurfaces).
+- **Crack prevention**: Includes overlap margins, optional skirt generation, and border snapping with configurable tolerances.
+- **Dynamic LOD**: Screen-space-error refinement with hysteresis plus queue throttling to keep loads responsive.
+- **Time-series aware**: Discovers available extracts/timesteps, prefetches neighbouring manifests/tiles, and auto-picks a slider or dropdown based on timestep count.
+- **HUD & diagnostics**: Live overlay for SSE thresholds/tile counts/cache size, wireframe toggle, per-tile bounding boxes, and colour-debug mode.
+- **Efficient streaming**: Fastify server with compression and caching.
 - **Interactive viewers**:
-  - Single-extract viewer with dat.GUI controls for dataset/time selection, LOD tuning, wireframe, and bounding-box diagnostics
-  - Multi-extract viewer for comparing multiple datasets
+  - Single-extract viewer with dat.GUI controls for dataset/time selection, LOD tuning, diagnostics, and HUD indicators.
+  - Multi-extract viewer for comparing multiple datasets.
 
 ## Installation
 
@@ -54,7 +56,7 @@ python3 build_tiles.py \
   --split_meshes
 ```
 
-Each run prints a size histogram (min/median/max, percentiles, KB buckets) plus a per-depth breakdown highlighting the share of tiles under 25 KB—handy for catching overly aggressive depth settings.
+Each run prints a size histogram (min/median/max, percentiles, KB buckets) plus a per-depth breakdown highlighting the share of tiles under 25 KB - handy for catching overly aggressive depth settings.
 
 #### World-Space Octree mode (no UVs required):
 ```bash
@@ -80,6 +82,28 @@ python3 build_tiles.py \
 - `--preserve_borders`: Snap simplified tile boundaries back to their original vertex positions and skip skirt geometry (helps on closed seams)
 - `--snap_radius`: Absolute world-space snapping tolerance (used with `--preserve_borders`)
 - `--snap_ratio`: Relative snapping tolerance expressed as a fraction of the tile’s bounding-box diagonal (default 1e-3, set to 0 to disable when using `--snap_radius` instead)
+- `--input_dir` + `--snapshots`: Treat every `.glb` in a directory as a successive time step (use with `--time` to set the starting index)
+
+### Unsteady datasets
+
+`examples/cylinders_unsteady/cylinders_unsteady.py` creates a series of rotating-cylinder snapshots:
+
+```bash
+# Generate 20 GLBs, rotating 5° per frame
+python3 examples/cylinders_unsteady/cylinders_unsteady.py \
+  --snapshots 20 --delta-degrees 5 \
+  --output_dir examples/cylinders_unsteady/output
+
+# Tile every snapshot (world-space octree example)
+python3 build_tiles.py --snapshots \
+  --input_dir examples/cylinders_unsteady/output \
+  --out_dir tiles_out \
+  --extract cylinders_unsteady_world \
+  --tiling_space world --max_depth 2 --target_kb 500 \
+  --preserve_borders --snap_ratio 0.001
+```
+
+Run the viewer and select `cylinders_unsteady_world`; the time slider scrubs between the manifests, and the viewer prefetches +/-1 and +/-2 timesteps to hide network latency.
 
 ### 2. Start the Server
 
@@ -94,7 +118,8 @@ The server will start on http://localhost:8080
 ### 3. View the Tiles
 
 - **Single-extract viewer**: http://localhost:8080/
-  - dat.GUI panel (top-right) lets you pick extract/time, adjust SSE thresholds, toggle wireframe, and overlay per-tile bounding boxes
+  - dat.GUI panel (top-right) lets you pick extract/time (slider when <=100 timesteps, dropdown otherwise), adjust SSE thresholds, toggle wireframe, overlay per-tile bounding boxes, and enable tile colours
+  - HUD (top-left) shows current SSE thresholds, active tile count, cache population, and a loading spinner
 - **Multi-extract viewer**: http://localhost:8080/multi_index.html
 
 ## Directory Structure
@@ -165,7 +190,7 @@ Each GLB tile includes metadata in `mesh.extras`:
 - **Pan**: Middle mouse drag
 - **dat.GUI panel**:
   - **Extract / Time**: Switch between datasets and time indices
-  - **SSE Refine**: Set the maximum screen-space error before refinement (0.1–50 px). The coarsen threshold automatically tracks at half this value for hysteresis.
+  - **SSE Refine**: Set the maximum screen-space error before refinement (0.1-50 px; default 6 px). The coarsen threshold automatically tracks at half this value for hysteresis.
   - **Wireframe**: Toggle mesh rendering between solid and wireframe
   - **Bounding Boxes**: Overlay each tile's world-space bounding box while keeping the surface visible
   - **Tile Colours**: Replace surface shading with a unique colour per tile to visualise current LOD coverage
@@ -182,12 +207,12 @@ Each GLB tile includes metadata in `mesh.extras`:
 - Typical values: 4-7
 
 ### SSE Thresholds
-- **Refine threshold**: Pixels of error before loading finer tiles (default: 3.0; adjustable via GUI 0.1–120 px)
+- **Refine threshold**: Pixels of error before loading finer tiles (default: 6.0; adjustable via GUI 0.1-50 px)
 - **Coarsen threshold**: Automatically set to half the refine value to provide hysteresis and reduce LOD thrashing
 
 ### Cache Settings
-- Adjust `MAX_TILES` in viewer.js for memory usage
-- Default: 500 tiles for the single viewer (roots are always kept resident)
+- Adjust `MAX_TILES` and `MAX_CACHE_BYTES` in `public/viewer.js` for memory usage
+- Defaults: 500 tiles / ~600 MB budget; root tiles stay resident for fast fallback
 
 ## API Endpoints
 
@@ -213,6 +238,7 @@ npm start
 
 - `examples/helical/helical.py`: builds an annular helical strip with UVs and colors.
 - `examples/cylinders/cylinders.py`: builds spokes of open cylinders (multiple meshes) between hub and tip radii; supports stacking multiple wheels along the Z-axis and optional sinusoidal radius modulation per cylinder.
+- `examples/cylinders_unsteady/cylinders_unsteady.py`: produces a time series of rotating cylinder spokes suitable for testing unsteady tiling.
 
 ## Troubleshooting
 
