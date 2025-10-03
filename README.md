@@ -83,6 +83,7 @@ python3 build_tiles.py \
 - `--snap_radius`: Absolute world-space snapping tolerance (used with `--preserve_borders`)
 - `--snap_ratio`: Relative snapping tolerance expressed as a fraction of the tile’s bounding-box diagonal (default 1e-3, set to 0 to disable when using `--snap_radius` instead)
 - `--input_dir` + `--snapshots`: Treat every `.glb` in a directory as a successive time step (use with `--time` to set the starting index)
+- `--skip_leaf_decimation`: Keep tiles at the deepest level at full resolution while still simplifying parent levels
 
 ### Unsteady datasets
 

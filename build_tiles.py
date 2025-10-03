@@ -325,9 +325,31 @@ def summarize_tile_sizes_by_depth(depth_sizes, heading="Per-depth tile stats", s
         min_kb = arr.min() / 1024.0
         max_kb = arr.max() / 1024.0
         small_frac = (arr / 1024.0 < small_threshold_kb).sum() / count * 100.0
+        total_mb = arr.sum() / (1024.0 * 1024.0)
         print(
             f"  z={z}: count {count:5d}, mean {mean_kb:6.1f} KB, min {min_kb:5.1f} KB, max {max_kb:6.1f} KB, "
-            f"small (<{small_threshold_kb:.0f} KB): {small_frac:5.1f}%"
+            f"total {total_mb:6.2f} MB, small (<{small_threshold_kb:.0f} KB): {small_frac:5.1f}%"
+        )
+
+
+def summarize_decimation(depth_ratios, heading="Approximate decimation ratios", warn_threshold=0.9):
+    if not depth_ratios:
+        return
+
+    by_depth: Dict[int, List[float]] = {}
+    for z, ratio in depth_ratios:
+        by_depth.setdefault(z, []).append(ratio)
+
+    print(heading + ":")
+    for z in sorted(by_depth):
+        arr = np.asarray(by_depth[z], dtype=np.float64)
+        mean_ratio = arr.mean()
+        min_ratio = arr.min()
+        mean_pct = mean_ratio * 100.0
+        min_pct = min_ratio * 100.0
+        flag = " !!!" if min_ratio < warn_threshold else ""
+        print(
+            f"  z={z}: mean retained {mean_pct:5.1f}% | min retained {min_pct:5.1f}%{flag}"
         )
 
 
@@ -616,7 +638,8 @@ def subset_trimesh(pos, uv, col, idx, tri_mask):
 def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                       max_depth=MAX_DEPTH, target_bytes=TARGET_TILE_BYTES,
                       split_meshes=False, preserve_borders=False,
-                      snap_radius=None, snap_ratio=None):
+                      snap_radius=None, snap_ratio=None,
+                      skip_leaf_decimation=False):
     """Build UV-based quadtree tiles"""
     mesh_entries = []
     if split_meshes:
@@ -677,6 +700,7 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
 
     all_tiles = []
     depth_size_samples = []
+    depth_decimation_samples = []
 
     for mesh_idx, entry in enumerate(mesh_entries):
         pos = entry["positions"]
@@ -702,6 +726,10 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                     if m is None:
                         continue
 
+                    orig_triangles = len(m.faces)
+                    if orig_triangles == 0:
+                        continue
+
                     orig_border_pts = None
                     snap_tol = None
                     if preserve_borders:
@@ -717,7 +745,12 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                             elif snap_ratio is not None:
                                 snap_tol = snap_ratio
 
-                    m = decimate_to_target(m, target_bytes)
+                    if not (skip_leaf_decimation and z == max_depth):
+                        m = decimate_to_target(m, target_bytes)
+
+                    decimated_triangles = len(m.faces)
+                    if orig_triangles > 0:
+                        depth_decimation_samples.append((z, decimated_triangles / orig_triangles))
 
                     if preserve_borders and orig_border_pts is not None and snap_tol is not None:
                         snap_decimated_border(m, orig_border_pts, snap_radius=snap_tol)
@@ -773,6 +806,7 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
     size_only = [size for (_, size) in depth_size_samples]
     summarize_tile_sizes(size_only, heading=f"Tile sizes for '{extract}' (uv)")
     summarize_tile_sizes_by_depth(depth_size_samples, heading="  Depth breakdown")
+    summarize_decimation(depth_decimation_samples, heading="  Retained triangle ratios")
 
 # ============================================================================
 # World-Space Octree Mode
@@ -836,7 +870,8 @@ def subset_trimesh_by_mask(pos, idx, mask, uv=None, col=None):
 
 def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                        max_depth=MAX_DEPTH, target_bytes=TARGET_TILE_BYTES,
-                       preserve_borders=False, snap_radius=None, snap_ratio=None):
+                       preserve_borders=False, snap_radius=None, snap_ratio=None,
+                       skip_leaf_decimation=False):
     """Build world-space octree tiles"""
     pos, uv, col, idx = load_glb_arrays(src_glb)
 
@@ -863,6 +898,7 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
 
     tiles_meta = {}
     depth_size_samples = []
+    depth_decimation_samples = []
 
     for z in range(0, max_depth+1):
         div = 1<<z
@@ -875,6 +911,10 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
 
                     m = subset_trimesh_by_mask(pos, idx, mask, uv=None, col=col)
                     if m is None:
+                        continue
+
+                    orig_triangles = len(m.faces)
+                    if orig_triangles == 0:
                         continue
 
                     orig_border_pts = None
@@ -892,7 +932,12 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                             elif snap_ratio is not None:
                                 snap_tol = snap_ratio
 
-                    m = decimate_to_target(m, target_bytes)
+                    if not (skip_leaf_decimation and z == max_depth):
+                        m = decimate_to_target(m, target_bytes)
+
+                    decimated_triangles = len(m.faces)
+                    if orig_triangles > 0:
+                        depth_decimation_samples.append((z, decimated_triangles / orig_triangles))
 
                     if preserve_borders and orig_border_pts is not None and snap_tol is not None:
                         snap_decimated_border(m, orig_border_pts, snap_radius=snap_tol)
@@ -946,6 +991,7 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
     size_only = [size for (_, size) in depth_size_samples]
     summarize_tile_sizes(size_only, heading=f"Tile sizes for '{extract}' (world)")
     summarize_tile_sizes_by_depth(depth_size_samples, heading="  Depth breakdown")
+    summarize_decimation(depth_decimation_samples, heading="  Retained triangle ratios")
 
 # ============================================================================
 # Crack Prevention: Skirts & Border Snapping
@@ -1061,6 +1107,8 @@ def main():
 
     parser.add_argument('--snapshots', action='store_true',
                         help='Process all GLB files in --input_dir as sequential time steps')
+    parser.add_argument('--skip_leaf_decimation', action='store_true',
+                        help='Keep tiles at max_depth at full resolution (still decimate parent levels)')
 
     args = parser.parse_args()
 
@@ -1092,7 +1140,8 @@ def main():
                 split_meshes=args.split_meshes,
                 preserve_borders=args.preserve_borders,
                 snap_radius=snap_radius,
-                snap_ratio=snap_ratio
+                snap_ratio=snap_ratio,
+                skip_leaf_decimation=args.skip_leaf_decimation
             )
         else:
             if args.split_meshes:
@@ -1102,7 +1151,8 @@ def main():
                 args.max_depth, target_bytes,
                 preserve_borders=args.preserve_borders,
                 snap_radius=snap_radius,
-                snap_ratio=snap_ratio
+                snap_ratio=snap_ratio,
+                skip_leaf_decimation=args.skip_leaf_decimation
             )
 
     if args.snapshots:

@@ -48,7 +48,7 @@ Similar structure but partitions using world-space AABBs instead of UV quads. Ke
 
 * Builds the `argparse` parser with shared flags. Notable options now include `--tiling_space`, `--split_meshes`, `--preserve_borders`, `--snap_radius`, `--snap_ratio`, plus snapshot helpers `--snapshots` and `--input_dir` (process sequential time steps) alongside the direct `--in_glb` path.
 * Normalises sizes (`target_bytes` = KB × 1024) and validates snap tolerances (`--snap_ratio`, `--snap_radius`). If `--preserve_borders` is enabled without an explicit tolerance the code falls back to a default `snap_ratio` of `1e-3`.
-* Dispatches to UV or world builder through an inner `process_single`. When `--snapshots` is set it sorts all `*.glb` files in the input directory, increments `time` per file, and invokes `process_single` for each. World-space tiling still rejects `--split_meshes`.
+* Dispatches to UV or world builder through an inner `process_single`. When `--snapshots` is set it sorts all `*.glb` files in the input directory, increments `time` per file, and invokes `process_single` for each. World-space tiling still rejects `--split_meshes`. The flag `--skip_leaf_decimation` skips `decimate_to_target` for tiles at `max_depth` so leaves retain the original geometry.
 
 ---
 
