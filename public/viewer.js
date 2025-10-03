@@ -416,8 +416,15 @@ class TileManager {
     const max = new THREE.Vector3(...meta.aabbWorld[1]);
     const box = new THREE.Box3(min, max);
     const hue = ((meta.z || 0) % 6) / 6;
-    const color = new THREE.Color().setHSL(hue, 0.65, 0.55);
-    return new THREE.Box3Helper(box, color);
+    const color = new THREE.Color().setHSL(hue, 0.85, 0.30);
+    const helper = new THREE.Box3Helper(box, color);
+    if (helper.material) {
+      helper.material.depthTest = false;
+      helper.material.transparent = true;
+      helper.material.opacity = 0.9;
+      helper.material.needsUpdate = true;
+    }
+    return helper;
   }
 
   _unload(id) {
