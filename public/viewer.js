@@ -517,6 +517,9 @@ class TileManager {
         const geom = obj.geometry;
         if (geom && !geom.attributes?.normal) {
           geom.computeVertexNormals?.();
+          info.generatedNormals = true;
+        } else if (geom) {
+          info.generatedNormals = false;
         }
         obj.material = info.simpleMaterial;
       }
@@ -538,6 +541,10 @@ class TileManager {
             geom.setAttribute('color', restored);
           } else {
             geom.deleteAttribute('color');
+          }
+          if (info.generatedNormals) {
+            geom.deleteAttribute('normal');
+            info.generatedNormals = false;
           }
         }
       }
@@ -679,7 +686,7 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
 
   // Setup scene
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x404040); // Lighter gray background
+  scene.background = new THREE.Color(0xdddddd); // Light grey for clearer wireframe contrast
 
   // Setup camera
   const camera = new THREE.PerspectiveCamera(
@@ -720,6 +727,8 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   let timeController = null;
   let tileColorController = null;
   let simpleShadingController = null;
+  let suppressTileColorHandler = false;
+  let suppressSimpleShadingHandler = false;
   let timeIsSlider = false;
   let extractsCache = [];
 
@@ -742,6 +751,68 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     }
     for (const [, rec] of mgr.cache) {
       apply(rec.obj3d);
+    }
+  }
+
+  function applyTileColorState(value) {
+    settings.tileColorMode = value;
+    mgr.tileColorMode = value;
+
+    if (value) {
+      for (const [, rec] of mgr.tiles) {
+        mgr._applyTileColor(rec);
+      }
+      for (const [id, rec] of mgr.cache) {
+        if (mgr.tiles.has(id)) continue;
+        mgr._applyTileColor(rec);
+      }
+    } else {
+      for (const [, rec] of mgr.tiles) {
+        if (mgr.simpleShadingMode) {
+          mgr._applySimpleShading(rec);
+        } else {
+          mgr._restoreTileMaterial(rec);
+        }
+      }
+      for (const [id, rec] of mgr.cache) {
+        if (mgr.tiles.has(id)) continue;
+        if (mgr.simpleShadingMode) {
+          mgr._applySimpleShading(rec);
+        } else {
+          mgr._restoreTileMaterial(rec);
+        }
+      }
+    }
+  }
+
+  function applySimpleShadingState(value) {
+    settings.simpleShading = value;
+    mgr.simpleShadingMode = value;
+
+    if (value) {
+      for (const [, rec] of mgr.tiles) {
+        mgr._applySimpleShading(rec);
+      }
+      for (const [id, rec] of mgr.cache) {
+        if (mgr.tiles.has(id)) continue;
+        mgr._applySimpleShading(rec);
+      }
+    } else {
+      for (const [, rec] of mgr.tiles) {
+        if (mgr.tileColorMode) {
+          mgr._applyTileColor(rec);
+        } else {
+          mgr._restoreTileMaterial(rec);
+        }
+      }
+      for (const [id, rec] of mgr.cache) {
+        if (mgr.tiles.has(id)) continue;
+        if (mgr.tileColorMode) {
+          mgr._applyTileColor(rec);
+        } else {
+          mgr._restoreTileMaterial(rec);
+        }
+      }
     }
   }
 
@@ -888,52 +959,39 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   });
 
   tileColorController = diagnosticsFolder.add(settings, 'tileColorMode').name('Tile Colours').onChange((value) => {
-    mgr.tileColorMode = value;
-    if (value && settings.simpleShading) {
-      settings.simpleShading = false;
-      if (simpleShadingController) {
-        simpleShadingController.setValue(false);
-      }
+    if (suppressTileColorHandler) {
+      settings.tileColorMode = value;
+      return;
     }
 
-    if (value) {
-      for (const [, rec] of mgr.tiles) {
-        mgr._applyTileColor(rec);
+    if (value && settings.simpleShading) {
+      if (simpleShadingController) {
+        suppressSimpleShadingHandler = true;
+        simpleShadingController.setValue(false);
+        suppressSimpleShadingHandler = false;
       }
-    } else {
-      for (const [, rec] of mgr.tiles) {
-        if (mgr.simpleShadingMode) {
-          mgr._applySimpleShading(rec);
-        } else {
-          mgr._restoreTileMaterial(rec);
-        }
-      }
+      applySimpleShadingState(false);
     }
+
+    applyTileColorState(value);
   });
 
   simpleShadingController = diagnosticsFolder.add(settings, 'simpleShading').name('Simple Shading').onChange((value) => {
-    settings.simpleShading = value;
-    mgr.simpleShadingMode = value;
-
-    if (value) {
-      if (settings.tileColorMode) {
-        settings.tileColorMode = false;
-        if (tileColorController) {
-          tileColorController.setValue(false);
-        }
-      }
-      for (const [, rec] of mgr.tiles) {
-        mgr._applySimpleShading(rec);
-      }
-    } else {
-      for (const [, rec] of mgr.tiles) {
-        if (mgr.tileColorMode) {
-          mgr._applyTileColor(rec);
-        } else {
-          mgr._restoreTileMaterial(rec);
-        }
-      }
+    if (suppressSimpleShadingHandler) {
+      settings.simpleShading = value;
+      return;
     }
+
+    if (value && settings.tileColorMode) {
+      if (tileColorController) {
+        suppressTileColorHandler = true;
+        tileColorController.setValue(false);
+        suppressTileColorHandler = false;
+      }
+      applyTileColorState(false);
+    }
+
+    applySimpleShadingState(value);
   });
 
   diagnosticsFolder.open();
