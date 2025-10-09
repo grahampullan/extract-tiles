@@ -3,3 +3,4 @@ tiles_out/
 node_modules/
 # Large generated assets
 examples/**/*.glb
+examples/dns*/

@@ -4,8 +4,8 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GUI } from "dat.gui";
 
 // Configuration
-let SSE_THRESHOLD_REFINE = 6.0;   // pixels
-let SSE_THRESHOLD_COARSEN = 3.0;  // hysteresis (auto-updated)
+let SSE_THRESHOLD_REFINE = 25.0;   // pixels
+let SSE_THRESHOLD_COARSEN = 12.5;  // hysteresis (auto-updated)
 const MAX_CONCURRENT = 6;
 const MAX_CACHE_BYTES = 600 * 1024 * 1024; // ~600 MB budget
 const MAX_TILES = 500;
@@ -715,8 +715,10 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   cameraLight.position.set(0, 0, 1);
   camera.add(cameraLight);
 
+  const DEFAULT_EXTRACT = 'dns-rough-2';
+
   const settings = {
-    extract: 'default',
+    extract: DEFAULT_EXTRACT,
     time: '0',
     sseRefine: SSE_THRESHOLD_REFINE,
     wireframe: false,
@@ -828,7 +830,7 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
       datasetFolder.remove(extractController);
     }
 
-    const names = extractsCache.length ? extractsCache.map(e => e.name) : ['default'];
+    const names = extractsCache.length ? extractsCache.map(e => e.name) : [DEFAULT_EXTRACT];
     if (!names.includes(settings.extract)) {
       settings.extract = names[0];
     }
@@ -938,7 +940,7 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     } catch (err) {
       console.error('Failed to load extracts list:', err);
       extractsCache = [];
-      settings.extract = 'default';
+      settings.extract = DEFAULT_EXTRACT;
       settings.time = '0';
       rebuildExtractController();
       rebuildTimeController();
