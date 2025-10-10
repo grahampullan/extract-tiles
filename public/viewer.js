@@ -736,8 +736,11 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   let timeController = null;
   let tileColorController = null;
   let simpleShadingController = null;
+  let sseRefineController = null;
   let suppressTileColorHandler = false;
   let suppressSimpleShadingHandler = false;
+  let suppressSseHandler = false;
+  let userAdjustedSSE = false;
   let timeIsSlider = false;
   let extractsCache = [];
 
@@ -823,6 +826,43 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
         }
       }
     }
+  }
+
+  function calibrateSSEThreshold() {
+    if (userAdjustedSSE) {
+      return false;
+    }
+
+    if (!mgr || !mgr.rootTileIds || !mgr.rootTileIds.size) {
+      return false;
+    }
+
+    let maxSSE = 0;
+    for (const id of mgr.rootTileIds) {
+      const meta = mgr.byId.get(id);
+      if (!meta) continue;
+      const sse = mgr._sse(meta);
+      if (!Number.isFinite(sse)) continue;
+      if (sse > maxSSE) {
+        maxSSE = sse;
+      }
+    }
+
+    if (!Number.isFinite(maxSSE) || maxSSE <= 0) {
+      return false;
+    }
+
+    const target = Math.max(maxSSE * 1.1, 30.0);
+    const clamped = Math.min(target, 120.0);
+    SSE_THRESHOLD_REFINE = clamped;
+    SSE_THRESHOLD_COARSEN = Math.max(0.05, clamped * 0.5);
+    settings.sseRefine = clamped;
+    if (sseRefineController) {
+      suppressSseHandler = true;
+      sseRefineController.setValue(clamped);
+      suppressSseHandler = false;
+    }
+    return true;
   }
 
   function rebuildExtractController() {
@@ -921,11 +961,18 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     mgr.showBoundingBoxes = settings.boundingBoxes;
     mgr.wireframeMode = settings.wireframe;
     mgr.clear();
+    SSE_THRESHOLD_REFINE = 1e6;
+    SSE_THRESHOLD_COARSEN = 5e5;
     await mgr.init(manifestUrl);
+    recenterCamera();
+    const calibrated = calibrateSSEThreshold();
+    if (!calibrated) {
+      SSE_THRESHOLD_REFINE = settings.sseRefine;
+      SSE_THRESHOLD_COARSEN = Math.max(0.05, settings.sseRefine * 0.5);
+    }
     applyWireframe(settings.wireframe);
     mgr.updateBoundingBoxVisibility();
     await mgr.tick();
-    recenterCamera();
     schedulePrefetchNeighbours(settings, extractsCache);
   }
 
@@ -948,7 +995,12 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     }
   }
 
-  lodFolder.add(settings, 'sseRefine', 0.1, 50, 0.1).name('SSE Refine').onChange((value) => {
+  sseRefineController = lodFolder.add(settings, 'sseRefine', 0.1, 120, 0.1).name('SSE Refine').onChange((value) => {
+    if (suppressSseHandler) {
+      settings.sseRefine = value;
+      return;
+    }
+    userAdjustedSSE = true;
     SSE_THRESHOLD_REFINE = value;
     SSE_THRESHOLD_COARSEN = Math.max(0.05, value * 0.5);
     mgr.tick();
