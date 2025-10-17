@@ -124,7 +124,7 @@ Quick summary (mostly unchanged):
 
 1. **Prevent overlap**: `tick` sets `_tickLock` to true while `_tickOnce` runs. If another tick is requested, set `_tickPending` and rerun once current pass completes.
 
-2. **Frustum & SSE**: `_decide()` calculates which tiles are needed (`want`). It walks the quadtree breadth-first, computing projected SSE and recursing into children when `sse > SSE_THRESHOLD_REFINE`.
+2. **Frustum & SSE**: `_decide()` calculates which tiles are needed (`want`). It precomputes median geometric error per depth, normalises each tile's SSE (`sse * medianDepthGE / tile.geometricError`), and recurses into children when that scaled value exceeds `SSE_THRESHOLD_REFINE` so varying mesh density doesn't skip intermediate levels.
 
 3. **Visibility pre-pass**: Toggle visibility (and helper visibility) for all `this.tiles` based on membership in `want`. Parents that appear in `replaceParents` stay visible while their descendants are still downloading (`_hasPendingDescendants`).
 
@@ -148,16 +148,17 @@ const settings = {
   time: '0',
   sseRefine: SSE_THRESHOLD_REFINE,
   wireframe: false,
-  boundingBoxes: false,
-  tileColorMode: false
+  boundingBoxes: true,
+  tileColorMode: false,
+  simpleShading: true
 };
 ```
 
 #### Controls
 
 * **Dataset folder** – repopulated from `/api/extracts`, dispatches manifest loads on change.
-* **LOD folder** – exposes `sseRefine`. Whenever the slider moves, `SSE_THRESHOLD_COARSEN` auto-updates to half of `sseRefine` and `tick()` reruns.
-* **Diagnostics** – toggles wireframe, bounding boxes, and tile colours. Each handler updates active tiles immediately:
+* **LOD folder** – exposes `sseRefine` (0.1–120 px, default 18 px). Whenever the slider moves, `SSE_THRESHOLD_COARSEN` auto-updates to half of `sseRefine` and `tick()` reruns.
+* **Diagnostics** – toggles wireframe, bounding boxes (default on), simple shading (default on), and tile colours. Each handler updates active tiles immediately:
   - Wireframe: sets `material.wireframe` for all meshes in `tiles` and `cache`.
   - Bounding boxes: adds/removes helpers only for active tiles. `updateBoundingBoxVisibility` ensures cached helpers are detached.
   - Tile colours: `_applyTileColor` swaps shading for active tiles using a per-mesh random HSL tint; `_restoreTileMaterial` returns to the stored material when turned off.

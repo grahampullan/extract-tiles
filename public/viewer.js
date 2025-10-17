@@ -4,8 +4,11 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GUI } from "dat.gui";
 
 // Configuration
-let SSE_THRESHOLD_REFINE = 25.0;   // pixels
-let SSE_THRESHOLD_COARSEN = 12.5;  // hysteresis (auto-updated)
+const DEFAULT_SSE_REFINE = 18.0;   // pixels
+const DEFAULT_SSE_COARSEN = DEFAULT_SSE_REFINE * 0.5;
+const ENABLE_SSE_AUTO_CALIBRATION = false;
+let SSE_THRESHOLD_REFINE = DEFAULT_SSE_REFINE;
+let SSE_THRESHOLD_COARSEN = DEFAULT_SSE_COARSEN;   // hysteresis (auto-updated)
 const MAX_CONCURRENT = 6;
 const MAX_CACHE_BYTES = 600 * 1024 * 1024; // ~600 MB budget
 const MAX_TILES = 500;
@@ -33,6 +36,7 @@ class TileManager {
     this.showBoundingBoxes = false; // Diagnostic overlay toggle
     this.tileColorMode = false; // Diagnostic colouring toggle
     this.simpleShadingMode = false; // Optional lambert shading toggle
+    this.levelGeMedian = new Map(); // Depth -> geometric error median
     this.rootTileIds = new Set();
     this._tickLock = false;
     this._tickPending = false;
@@ -48,6 +52,7 @@ class TileManager {
         return;
       }
       this.manifest = manifest;
+      this._computeLevelGeStats();
       for (const t of this.manifest.tiles) {
         this.byId.set(t.tileId, t);
         if (t.parent == null) {
@@ -132,15 +137,20 @@ class TileManager {
       if (!this._visible(meta)) return;
 
       const sse = this._sse(meta);
+      const medianGe = this.levelGeMedian.get(meta.z);
+      const geoError = meta.geometricError;
+      const normalizedSse = (medianGe && geoError)
+        ? sse * (medianGe / Math.max(geoError, 1e-9))
+        : sse;
       const hasChildren = (meta.children || []).length > 0;
 
-      if (hasChildren && sse > SSE_THRESHOLD_REFINE) {
+      if (hasChildren && normalizedSse > SSE_THRESHOLD_REFINE) {
         replaceParents.add(meta.tileId);
         // Need more detail - recurse to children
         for (const c of this._children(meta)) {
           visit(c);
         }
-      } else if (sse < SSE_THRESHOLD_COARSEN || !hasChildren) {
+      } else if (normalizedSse < SSE_THRESHOLD_COARSEN || !hasChildren) {
         // Use this tile
         want.add(meta.tileId);
       } else {
@@ -155,6 +165,27 @@ class TileManager {
 
     this.hudLOD.textContent = `τ=${SSE_THRESHOLD_REFINE.toFixed(1)}px / ${SSE_THRESHOLD_COARSEN.toFixed(1)}px`;
     return { want, replaceParents };
+  }
+
+  _computeLevelGeStats() {
+    this.levelGeMedian.clear();
+    const perLevel = new Map();
+    for (const tile of this.manifest?.tiles || []) {
+      const ge = tile?.geometricError;
+      if (!(typeof ge === 'number') || ge <= 0) continue;
+      if (!perLevel.has(tile.z)) {
+        perLevel.set(tile.z, []);
+      }
+      perLevel.get(tile.z).push(ge);
+    }
+    for (const [depth, values] of perLevel) {
+      values.sort((a, b) => a - b);
+      const mid = Math.floor(values.length / 2);
+      const median = values.length % 2
+        ? values[mid]
+        : 0.5 * (values[mid - 1] + values[mid]);
+      this.levelGeMedian.set(depth, median || values[mid] || 0);
+    }
   }
 
   async _tickOnce() {
@@ -601,6 +632,7 @@ class TileManager {
   clear() {
     this.manifestVersion += 1;
     this.rootTileIds.clear();
+    this.levelGeMedian.clear();
     // Unload all tiles
     for (const [, rec] of this.tiles) {
       this.scene.remove(rec.obj3d);
@@ -722,10 +754,13 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     time: '0',
     sseRefine: SSE_THRESHOLD_REFINE,
     wireframe: false,
-    boundingBoxes: false,
+    boundingBoxes: true,
     tileColorMode: false,
-    simpleShading: false
+    simpleShading: true
   };
+
+  mgr.showBoundingBoxes = settings.boundingBoxes;
+  mgr.simpleShadingMode = settings.simpleShading;
 
   const gui = new GUI({ width: 300 });
   const datasetFolder = gui.addFolder('Dataset');
@@ -959,20 +994,25 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   async function loadManifest() {
     const manifestUrl = `/manifest/${settings.extract}/${settings.time}.json`;
     mgr.showBoundingBoxes = settings.boundingBoxes;
+    mgr.simpleShadingMode = settings.simpleShading;
     mgr.wireframeMode = settings.wireframe;
     mgr.clear();
     SSE_THRESHOLD_REFINE = 1e6;
     SSE_THRESHOLD_COARSEN = 5e5;
     await mgr.init(manifestUrl);
     recenterCamera();
-    const calibrated = calibrateSSEThreshold();
+    const calibrated = ENABLE_SSE_AUTO_CALIBRATION ? calibrateSSEThreshold() : false;
     if (!calibrated) {
       SSE_THRESHOLD_REFINE = settings.sseRefine;
       SSE_THRESHOLD_COARSEN = Math.max(0.05, settings.sseRefine * 0.5);
+      sseRefineController?.updateDisplay?.();
     }
     applyWireframe(settings.wireframe);
     mgr.updateBoundingBoxVisibility();
     await mgr.tick();
+    if (settings.simpleShading) {
+      applySimpleShadingState(true);
+    }
     schedulePrefetchNeighbours(settings, extractsCache);
   }
 

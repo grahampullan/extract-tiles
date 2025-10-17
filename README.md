@@ -9,7 +9,7 @@ A multi-resolution tiling system for visualizing large triangulated mesh surface
   - UV-Quadtree: For meshes with texture coordinates.
   - World-Space Octree: For meshes without UVs (e.g., isosurfaces).
 - **Crack prevention**: Includes overlap margins, optional skirt generation, and border snapping with configurable tolerances.
-- **Dynamic LOD**: Screen-space-error refinement with hysteresis plus queue throttling to keep loads responsive.
+- **Dynamic LOD**: Screen-space-error refinement with hysteresis, per-depth SSE normalisation to avoid skipping intermediate levels, and queue throttling to keep loads responsive.
 - **Time-series aware**: Discovers available extracts/timesteps, prefetches neighbouring manifests/tiles, and auto-picks a slider or dropdown based on timestep count.
 - **HUD & diagnostics**: Live overlay for SSE thresholds/tile counts/cache size, wireframe toggle, per-tile bounding boxes, tile-colour debug mode, and a camera-aligned lambert shading option.
 - **Efficient streaming**: Fastify server with compression and caching.
@@ -198,11 +198,11 @@ Each GLB tile includes metadata in `mesh.extras`:
 - **Pan**: Middle mouse drag
 - **dat.GUI panel**:
   - **Extract / Time**: Switch between datasets and time indices
-  - **SSE Refine**: Set the maximum screen-space error before refinement (0.1-50 px; default 6 px). The coarsen threshold automatically tracks at half this value for hysteresis.
+  - **SSE Refine**: Set the maximum screen-space error before refinement (0.1-120 px; default 18 px). The coarsen threshold automatically tracks at half this value for hysteresis.
   - **Wireframe**: Toggle mesh rendering between solid and wireframe
-  - **Bounding Boxes**: Overlay each tile's world-space bounding box while keeping the surface visible
+  - **Bounding Boxes**: Overlay each tile's world-space bounding box while keeping the surface visible (default: on)
   - **Tile Colours**: Replace surface shading with a unique colour per tile to visualise current LOD coverage
-  - **Simple Shading**: Swap to a lambert material (optionally using vertex colours) for a softer lit appearance; combines the viewer’s ambient fill with a directional light mounted to the camera so highlights track your orbit
+  - **Simple Shading**: Swap to a lambert material (optionally using vertex colours) for a softer lit appearance; combines the viewer’s ambient fill with a directional light mounted to the camera so highlights track your orbit (default: on)
 
 ## Performance Tuning
 
