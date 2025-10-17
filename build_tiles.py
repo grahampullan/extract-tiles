@@ -10,11 +10,13 @@ import pathlib
 import math
 import base64
 import argparse
+import io
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 import numpy as np
 import trimesh as tm
 import open3d as o3d
+from PIL import Image
 from pygltflib import (
     GLTF2, Buffer, BufferView, Accessor, Mesh, Node, Scene,
     Asset, Attributes, Primitive
@@ -48,6 +50,9 @@ def _load_gltf_with_buffers(path: str):
                 cursor += length
         else:
             buffers.append(blob)
+        if not isinstance(gltf.extras, dict):
+            gltf.extras = {}
+        gltf.extras.setdefault('_base_dir', str(src.parent))
         return gltf, buffers
 
     if suffix == ".gltf":
@@ -66,6 +71,9 @@ def _load_gltf_with_buffers(path: str):
                 if not buf_path.exists():
                     raise FileNotFoundError(f"Referenced buffer '{uri}' not found relative to '{path}'.")
                 buffers.append(buf_path.read_bytes())
+        if not isinstance(gltf.extras, dict):
+            gltf.extras = {}
+        gltf.extras.setdefault('_base_dir', str(base_dir))
         return gltf, buffers
 
     raise ValueError(f"Unsupported file extension '{suffix}' for '{path}'. Expected .gltf or .glb")
@@ -115,6 +123,152 @@ def _make_accessor_reader(gltf: GLTF2, buffers: List[bytes]):
         return arr.reshape(acc.count, ncomp).copy()
 
     return to_np
+
+
+def _get_image_bytes(gltf: GLTF2, buffers: List[bytes], image_index: int) -> Optional[bytes]:
+    images = gltf.images or []
+    if image_index is None or image_index < 0 or image_index >= len(images):
+        return None
+
+    image = images[image_index]
+    if image.uri:
+        if image.uri.startswith('data:'):
+            try:
+                _, data = image.uri.split(',', 1)
+                return base64.b64decode(data)
+            except Exception:
+                return None
+        base_dir = gltf.extras.get('_base_dir') if isinstance(gltf.extras, dict) else None
+        if base_dir:
+            try:
+                return (Path(base_dir) / image.uri).read_bytes()
+            except FileNotFoundError:
+                return None
+        return None
+
+    if image.bufferView is not None:
+        view = gltf.bufferViews[image.bufferView]
+        buf = buffers[view.buffer]
+        offset = view.byteOffset or 0
+        length = view.byteLength or 0
+        return bytes(memoryview(buf)[offset:offset + length])
+
+    return None
+
+
+def _append_buffer_bytes(gltf: GLTF2, buffers: List[bytes], data: bytes) -> int:
+    buffer_index = len(buffers)
+    buffers.append(data)
+    gltf.buffers = list(gltf.buffers or [])
+    gltf.buffers.append(Buffer(byteLength=len(data)))
+    return buffer_index
+
+
+def bake_textures_to_vertex_colors(gltf: GLTF2, buffers: List[bytes]):
+    if not isinstance(gltf.extras, dict):
+        gltf.extras = {} if gltf.extras is None else dict(gltf.extras)
+
+    extras = gltf.extras
+    if extras.get('_baked_vertex_colors'):
+        return
+
+    extras['_baked_vertex_colors'] = True
+
+    textures = gltf.textures or []
+    if not textures:
+        return
+
+    images = gltf.images or []
+    if not images:
+        return
+
+    if not gltf.materials:
+        return
+
+    reader = _make_accessor_reader(gltf, buffers)
+
+    for mesh in (gltf.meshes or []):
+        for prim in (mesh.primitives or []):
+            attrs_dict = getattr(prim, 'attributes', None)
+            if attrs_dict is None:
+                continue
+            attrs_dict = dict(getattr(attrs_dict, '__dict__', {}))
+            if attrs_dict.get('COLOR_0') is not None:
+                continue
+
+            material_index = prim.material
+            if material_index is None or material_index < 0 or material_index >= len(gltf.materials):
+                continue
+
+            material = gltf.materials[material_index]
+            pbr = getattr(material, 'pbrMetallicRoughness', None)
+            tex_info = getattr(pbr, 'baseColorTexture', None) if pbr else None
+            if not tex_info or tex_info.index is None:
+                continue
+
+            texture = textures[tex_info.index]
+            image_index = texture.source
+            if image_index is None:
+                continue
+
+            image_bytes = _get_image_bytes(gltf, buffers, image_index)
+            if not image_bytes:
+                continue
+
+            try:
+                img = Image.open(io.BytesIO(image_bytes))
+            except Exception:
+                continue
+            img = img.convert('RGBA')
+            tex_array = np.array(img)
+            if tex_array.size == 0:
+                continue
+            height, width, _ = tex_array.shape
+
+            texcoord_index = tex_info.texCoord or 0
+            texcoord_key = f'TEXCOORD_{texcoord_index}'
+            tex_accessor_idx = attrs_dict.get(texcoord_key)
+            if tex_accessor_idx is None:
+                continue
+
+            uv = reader(tex_accessor_idx)
+            if uv is None or uv.size == 0:
+                continue
+            uv = uv[:, :2]
+            uv = np.nan_to_num(uv)
+            uv = np.clip(uv, 0.0, 1.0)
+
+            xs = np.clip(np.round(uv[:, 0] * (width - 1)).astype(int), 0, width - 1)
+            ys = np.clip(np.round(uv[:, 1] * (height - 1)).astype(int), 0, height - 1)
+
+            colors = tex_array[ys, xs]
+            if colors.dtype != np.uint8:
+                colors = np.clip(colors, 0, 255).astype(np.uint8)
+
+            uniq_colors = np.unique(colors, axis=0)
+            print(f"[bake] mesh has {len(colors)} vertices, unique colors={len(uniq_colors)}; sample={uniq_colors[:5]}")
+
+            color_bytes = colors.tobytes()
+            buffer_index = _append_buffer_bytes(gltf, buffers, color_bytes)
+
+            gltf.bufferViews = list(gltf.bufferViews or [])
+            buffer_view_index = len(gltf.bufferViews)
+            gltf.bufferViews.append(BufferView(buffer=buffer_index, byteOffset=0, byteLength=len(color_bytes), target=34962))
+
+            gltf.accessors = list(gltf.accessors or [])
+            accessor_index = len(gltf.accessors)
+            gltf.accessors.append(Accessor(bufferView=buffer_view_index,
+                                           componentType=5121,
+                                           count=colors.shape[0],
+                                           type='VEC4',
+                                           normalized=True))
+
+            setattr(prim.attributes, 'COLOR_0', accessor_index)
+
+            if pbr:
+                pbr.baseColorTexture = None
+                if getattr(pbr, 'baseColorFactor', None) is None:
+                    pbr.baseColorFactor = [1.0, 1.0, 1.0, 1.0]
 
 
 def _triangulate_indices(raw_idx: Optional[np.ndarray], mode: Optional[int], vertex_count: int) -> np.ndarray:
@@ -171,6 +325,7 @@ def _triangulate_indices(raw_idx: Optional[np.ndarray], mode: Optional[int], ver
 def load_glb_arrays(path):
     """Load GLB/GLTF file and extract arrays for vertices, UVs, colors, and indices."""
     gltf, buffers = _load_gltf_with_buffers(path)
+    bake_textures_to_vertex_colors(gltf, buffers)
     to_np = _make_accessor_reader(gltf, buffers)
 
     all_pos = []
@@ -200,22 +355,26 @@ def load_glb_arrays(path):
             col = None
             if hasattr(prim.attributes, 'COLOR_0') and prim.attributes.COLOR_0 is not None:
                 col_raw = to_np(prim.attributes.COLOR_0)
-                # Normalize to uint8 RGBA for consistency
-                if col_raw.dtype == np.uint8:
-                    if col_raw.shape[1] == 3:
-                        col = np.hstack([col_raw, np.full((col_raw.shape[0],1), 255, dtype=np.uint8)])
+                if col_raw is not None and col_raw.size:
+                    if col_raw.dtype == np.uint8:
+                        if col_raw.shape[1] == 3:
+                            col = np.hstack([col_raw, np.full((col_raw.shape[0],1), 255, dtype=np.uint8)])
+                        else:
+                            col = col_raw.astype(np.uint8)
                     else:
-                        col = col_raw.astype(np.uint8)
-                else:
-                    # float colors in [0,1]
-                    c = np.clip(col_raw.astype(np.float32), 0.0, 1.0)
-                    if c.shape[1] == 3:
-                        c = np.hstack([c, np.ones((c.shape[0],1), np.float32)])
-                    col = (c * 255.0 + 0.5).astype(np.uint8)
+                        c = np.clip(col_raw.astype(np.float32), 0.0, 1.0)
+                        if c.shape[1] == 3:
+                            c = np.hstack([c, np.ones((c.shape[0],1), np.float32)])
+                        col = (c * 255.0 + 0.5).astype(np.uint8)
+
+            if col is None:
+                base = _material_base_color_rgba(gltf, getattr(prim, 'material', None))
+                col = np.tile(base, (pos.shape[0], 1))
 
             all_pos.append(pos)
-            if uv is not None:   all_uv.append(uv)
-            if col is not None:  all_col.append(col)
+            if uv is not None:
+                all_uv.append(uv)
+            all_col.append(col)
             all_idx.append(idx)
             v_offset += pos.shape[0]
 
@@ -235,6 +394,7 @@ def load_glb_arrays(path):
 def load_glb_mesh_primitives(path):
     """Load GLB/GLTF and return per-primitive arrays (positions, uv, colors, indices)."""
     gltf, buffers = _load_gltf_with_buffers(path)
+    bake_textures_to_vertex_colors(gltf, buffers)
     to_np = _make_accessor_reader(gltf, buffers)
 
     meshes = []
@@ -258,16 +418,21 @@ def load_glb_mesh_primitives(path):
             col = None
             if hasattr(prim.attributes, 'COLOR_0') and prim.attributes.COLOR_0 is not None:
                 col_raw = to_np(prim.attributes.COLOR_0)
-                if col_raw.dtype == np.uint8:
-                    if col_raw.shape[1] == 3:
-                        col = np.hstack([col_raw, np.full((col_raw.shape[0],1), 255, dtype=np.uint8)])
+                if col_raw is not None and col_raw.size:
+                    if col_raw.dtype == np.uint8:
+                        if col_raw.shape[1] == 3:
+                            col = np.hstack([col_raw, np.full((col_raw.shape[0],1), 255, dtype=np.uint8)])
+                        else:
+                            col = col_raw.astype(np.uint8)
                     else:
-                        col = col_raw.astype(np.uint8)
-                else:
-                    c = np.clip(col_raw.astype(np.float32), 0.0, 1.0)
-                    if c.shape[1] == 3:
-                        c = np.hstack([c, np.ones((c.shape[0],1), np.float32)])
-                    col = (c * 255.0 + 0.5).astype(np.uint8)
+                        c = np.clip(col_raw.astype(np.float32), 0.0, 1.0)
+                        if c.shape[1] == 3:
+                            c = np.hstack([c, np.ones((c.shape[0],1), np.float32)])
+                        col = (c * 255.0 + 0.5).astype(np.uint8)
+
+            if col is None:
+                base = _material_base_color_rgba(gltf, getattr(prim, 'material', None))
+                col = np.tile(base, (pos.shape[0], 1))
 
             meshes.append({
                 "name": mesh.name or f"mesh{mesh_idx}",
@@ -465,6 +630,43 @@ def decimate_to_target(m: tm.Trimesh, target_bytes, min_ratio=0.02, min_tris=32,
 
     return current
 
+
+def voxel_cluster_trimesh(mesh: tm.Trimesh, voxel_size: float) -> Optional[tm.Trimesh]:
+    """Fallback simplifier using Open3D's vertex clustering."""
+    if voxel_size <= 0:
+        return None
+    orig_pos = np.asarray(mesh.vertices, dtype=np.float32)
+    orig_uv = getattr(mesh.visual, 'uv', None)
+    if orig_uv is not None:
+        orig_uv = np.asarray(orig_uv, dtype=np.float32)
+        if orig_uv.size == 0:
+            orig_uv = None
+    orig_col = getattr(mesh.visual, 'vertex_colors', None)
+    if orig_col is not None:
+        orig_col = np.asarray(orig_col, dtype=np.uint8)
+        if orig_col.size == 0:
+            orig_col = None
+
+    o3d_mesh = o3d_from_trimesh(mesh)
+    if orig_col is not None:
+        rgb = orig_col[:, :3].astype(np.float32) / 255.0
+        o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(rgb)
+
+    clustered = o3d_mesh.simplify_vertex_clustering(voxel_size=voxel_size)
+    triangles = np.asarray(clustered.triangles)
+    if triangles.size == 0:
+        return None
+    vertices = np.asarray(clustered.vertices, dtype=np.float32)
+
+    new_uv, new_col = transfer_attrs_nn(orig_pos, orig_uv, orig_col, vertices)
+
+    clustered_trimesh = tm.Trimesh(vertices=vertices, faces=triangles.astype(np.uint32), process=False)
+    if new_uv is not None:
+        clustered_trimesh.visual.uv = new_uv
+    if new_col is not None:
+        clustered_trimesh.visual.vertex_colors = new_col
+    return clustered_trimesh
+
 def write_glb_from_trimesh(m: tm.Trimesh, meta: dict, out_path: str):
     """Write trimesh to GLB file with metadata.
     Now chooses 16-bit indices when possible for broader compatibility (and smaller files).
@@ -639,7 +841,9 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                       max_depth=MAX_DEPTH, target_bytes=TARGET_TILE_BYTES,
                       split_meshes=False, preserve_borders=False,
                       snap_radius=None, snap_ratio=None,
-                      skip_leaf_decimation=False):
+                      skip_leaf_decimation=False,
+                      min_ratio=0.02, min_tris=32, max_iter=6,
+                      root_voxel_ratio=None, root_voxel_trigger=4.0):
     """Build UV-based quadtree tiles"""
     mesh_entries = []
     if split_meshes:
@@ -732,7 +936,8 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
 
                     orig_border_pts = None
                     snap_tol = None
-                    if preserve_borders:
+                    preserve_this_tile = preserve_borders and z > 0
+                    if preserve_this_tile:
                         border_edges = compute_border_edges(m)
                         if border_edges:
                             unique_idx = np.unique(np.asarray(border_edges).flatten())
@@ -746,13 +951,30 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                                 snap_tol = snap_ratio
 
                     if not (skip_leaf_decimation and z == max_depth):
-                        m = decimate_to_target(m, target_bytes)
+                        m = decimate_to_target(m, target_bytes, min_ratio=min_ratio, min_tris=min_tris, max_iter=max_iter)
+
+                    approx = estimate_bytes(len(m.vertices), len(m.faces),
+                                           getattr(m.visual, 'uv', None) is not None,
+                                           getattr(m.visual, 'vertex_colors', None) is not None)
+
+                    if z == 0 and root_voxel_ratio is not None and approx > target_bytes * root_voxel_trigger:
+                        diag = float(np.linalg.norm(m.bounds[1] - m.bounds[0]))
+                        if diag > 0:
+                            voxel = max(root_voxel_ratio * diag, 1e-6)
+                            clustered = voxel_cluster_trimesh(m, voxel)
+                            if clustered is not None and len(clustered.faces):
+                                m = clustered
+                                if not (skip_leaf_decimation and z == max_depth):
+                                    m = decimate_to_target(m, target_bytes, min_ratio=min_ratio, min_tris=min_tris, max_iter=max_iter)
+                                approx = estimate_bytes(len(m.vertices), len(m.faces),
+                                                       getattr(m.visual, 'uv', None) is not None,
+                                                       getattr(m.visual, 'vertex_colors', None) is not None)
 
                     decimated_triangles = len(m.faces)
                     if orig_triangles > 0:
                         depth_decimation_samples.append((z, decimated_triangles / orig_triangles))
 
-                    if preserve_borders and orig_border_pts is not None and snap_tol is not None:
+                    if preserve_this_tile and orig_border_pts is not None and snap_tol is not None:
                         snap_decimated_border(m, orig_border_pts, snap_radius=snap_tol)
 
                     aabb_min = m.bounds[0].tolist()
@@ -760,10 +982,6 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                     tid = f"{mesh_idx}/{z}/{x}/{y}"
 
                     kids = [f"{mesh_idx}/{z+1}/{2*x+dx}/{2*y+dy}" for dx in (0,1) for dy in (0,1)] if z<max_depth else []
-
-                    approx = estimate_bytes(len(m.vertices), len(m.faces),
-                                           getattr(m.visual, 'uv', None) is not None,
-                                           getattr(m.visual, 'vertex_colors', None) is not None)
 
                     meta = {
                         "tileId": tid,
@@ -784,7 +1002,7 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
 
                     out_path = os.path.join(out_dir, extract, str(time_index),
                                            f"mesh_{mesh_idx}", str(z), str(x), f"{y}.glb")
-                    if not preserve_borders:
+                    if not preserve_this_tile:
                         add_skirts(m, skirt_h_ratio=0.10)
                     write_glb_from_trimesh(m, meta, out_path)
                     actual_bytes = os.path.getsize(out_path)
@@ -871,7 +1089,9 @@ def subset_trimesh_by_mask(pos, idx, mask, uv=None, col=None):
 def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                        max_depth=MAX_DEPTH, target_bytes=TARGET_TILE_BYTES,
                        preserve_borders=False, snap_radius=None, snap_ratio=None,
-                       skip_leaf_decimation=False):
+                       skip_leaf_decimation=False,
+                       min_ratio=0.02, min_tris=32, max_iter=6,
+                       root_voxel_ratio=None, root_voxel_trigger=4.0):
     """Build world-space octree tiles"""
     pos, uv, col, idx = load_glb_arrays(src_glb)
 
@@ -919,7 +1139,8 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
 
                     orig_border_pts = None
                     snap_tol = None
-                    if preserve_borders:
+                    preserve_this_tile = preserve_borders and z > 0
+                    if preserve_this_tile:
                         border_edges = compute_border_edges(m)
                         if border_edges:
                             unique_idx = np.unique(np.asarray(border_edges).flatten())
@@ -933,13 +1154,28 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                                 snap_tol = snap_ratio
 
                     if not (skip_leaf_decimation and z == max_depth):
-                        m = decimate_to_target(m, target_bytes)
+                        m = decimate_to_target(m, target_bytes, min_ratio=min_ratio, min_tris=min_tris, max_iter=max_iter)
+
+                    approx = estimate_bytes(len(m.vertices), len(m.faces),
+                                           False, getattr(m.visual, 'vertex_colors', None) is not None)
+
+                    if z == 0 and root_voxel_ratio is not None and approx > target_bytes * root_voxel_trigger:
+                        diag = float(np.linalg.norm(m.bounds[1] - m.bounds[0]))
+                        if diag > 0:
+                            voxel = max(root_voxel_ratio * diag, 1e-6)
+                            clustered = voxel_cluster_trimesh(m, voxel)
+                            if clustered is not None and len(clustered.faces):
+                                m = clustered
+                                if not (skip_leaf_decimation and z == max_depth):
+                                    m = decimate_to_target(m, target_bytes, min_ratio=min_ratio, min_tris=min_tris, max_iter=max_iter)
+                                approx = estimate_bytes(len(m.vertices), len(m.faces),
+                                                       False, getattr(m.visual, 'vertex_colors', None) is not None)
 
                     decimated_triangles = len(m.faces)
                     if orig_triangles > 0:
                         depth_decimation_samples.append((z, decimated_triangles / orig_triangles))
 
-                    if preserve_borders and orig_border_pts is not None and snap_tol is not None:
+                    if preserve_this_tile and orig_border_pts is not None and snap_tol is not None:
                         snap_decimated_border(m, orig_border_pts, snap_radius=snap_tol)
 
                     aabb_min = m.bounds[0].tolist()
@@ -968,7 +1204,7 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
 
                     out_path = os.path.join(out_dir, extract, str(time_index),
                                            str(z), str(i), str(j), f"{k}.glb")
-                    if not preserve_borders:
+                    if not preserve_this_tile:
                         add_skirts(m, skirt_h_ratio=0.10)
                     write_glb_from_trimesh(m, meta, out_path)
                     actual_bytes = os.path.getsize(out_path)
@@ -1024,8 +1260,9 @@ def add_skirts(tri_mesh: tm.Trimesh, skirt_h_ratio=0.1):
     # Get original UV and color data
     orig_uv = None
     orig_colors = None
-    if tri_mesh.visual.uv is not None:
-        orig_uv = np.asarray(tri_mesh.visual.uv)
+    uv_attr = getattr(tri_mesh.visual, 'uv', None)
+    if uv_attr is not None:
+        orig_uv = np.asarray(uv_attr)
     if tri_mesh.visual.vertex_colors is not None:
         orig_colors = np.asarray(tri_mesh.visual.vertex_colors)
 
@@ -1109,6 +1346,16 @@ def main():
                         help='Process all GLB files in --input_dir as sequential time steps')
     parser.add_argument('--skip_leaf_decimation', action='store_true',
                         help='Keep tiles at max_depth at full resolution (still decimate parent levels)')
+    parser.add_argument('--min_ratio', type=float, default=0.02,
+                        help='Minimum triangle ratio retained per decimation pass (default 0.02 = 2%)')
+    parser.add_argument('--min_tris', type=int, default=32,
+                        help='Minimum triangle count allowed during decimation (default 32)')
+    parser.add_argument('--max_iter', type=int, default=6,
+                        help='Maximum decimation iterations per tile (default 6)')
+    parser.add_argument('--root_voxel_ratio', type=float, default=None,
+                        help='If set, fallback voxel clustering ratio (fraction of bounding box diagonal) for root tiles when decimation cannot reach target size')
+    parser.add_argument('--root_voxel_trigger', type=float, default=4.0,
+                        help='Multiplier of target bytes that triggers root voxel clustering (default 4x target)')
 
     args = parser.parse_args()
 
@@ -1133,6 +1380,13 @@ def main():
         snap_ratio = 1e-3  # default relative tolerance
 
     def process_single(glb_path: str, time_idx: int):
+        if args.min_ratio is not None and args.min_ratio <= 0:
+            raise ValueError('--min_ratio must be positive')
+        if args.min_tris is not None and args.min_tris <= 0:
+            raise ValueError('--min_tris must be positive')
+        if args.max_iter is not None and args.max_iter <= 0:
+            raise ValueError('--max_iter must be positive')
+
         if args.tiling_space == 'uv':
             build_uv_quadtree(
                 glb_path, args.out_dir, args.extract, time_idx,
@@ -1141,7 +1395,12 @@ def main():
                 preserve_borders=args.preserve_borders,
                 snap_radius=snap_radius,
                 snap_ratio=snap_ratio,
-                skip_leaf_decimation=args.skip_leaf_decimation
+                skip_leaf_decimation=args.skip_leaf_decimation,
+                min_ratio=args.min_ratio,
+                min_tris=args.min_tris,
+                max_iter=args.max_iter,
+                root_voxel_ratio=args.root_voxel_ratio,
+                root_voxel_trigger=args.root_voxel_trigger
             )
         else:
             if args.split_meshes:
@@ -1152,7 +1411,12 @@ def main():
                 preserve_borders=args.preserve_borders,
                 snap_radius=snap_radius,
                 snap_ratio=snap_ratio,
-                skip_leaf_decimation=args.skip_leaf_decimation
+                skip_leaf_decimation=args.skip_leaf_decimation,
+                min_ratio=args.min_ratio,
+                min_tris=args.min_tris,
+                max_iter=args.max_iter,
+                root_voxel_ratio=args.root_voxel_ratio,
+                root_voxel_trigger=args.root_voxel_trigger
             )
 
     if args.snapshots:

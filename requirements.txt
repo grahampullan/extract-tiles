@@ -2,3 +2,4 @@ numpy>=1.21.0
 trimesh>=3.20.0
 open3d>=0.17.0
 pygltflib>=1.16.0
+Pillow>=9.0.0

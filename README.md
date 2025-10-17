@@ -84,6 +84,13 @@ python3 build_tiles.py \
 - `--snap_ratio`: Relative snapping tolerance expressed as a fraction of the tile’s bounding-box diagonal (default 1e-3, set to 0 to disable when using `--snap_radius` instead)
 - `--input_dir` + `--snapshots`: Treat every `.glb` in a directory as a successive time step (use with `--time` to set the starting index)
 - `--skip_leaf_decimation`: Keep tiles at the deepest level at full resolution while still simplifying parent levels
+- `--min_ratio`: Minimum fraction of faces retained per decimation pass (default 0.02 = 2%)
+- `--min_tris`: Minimum triangle count allowed during decimation (default 32)
+- `--max_iter`: Maximum number of decimation iterations per tile (default 6)
+- `--root_voxel_ratio`: (optional) fraction of the root tile bounding-box diagonal to use for voxel clustering fallback when decimation cannot hit the byte target
+- `--root_voxel_trigger`: Multiple of the byte target that triggers the voxel clustering fallback (default 4x)
+
+During import, any PBR base-colour textures are baked into per-vertex `COLOR_0` attributes so that world-space tiles can render with colour without shipping textures.
 
 ### Unsteady datasets
 

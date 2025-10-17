@@ -28,15 +28,17 @@ await app.register(fastifyStatic, {
 });
 
 // Tiles (supports all layouts: UV-quadtree, world-octree, atlas-quadtree)
-app.get('/tiles/*', async (req, reply) => {
-  const p = path.join(DATA_ROOT, decodeURIComponent(req.params['*']));
-  try {
-    await fs.access(p);
-    reply.header('Content-Type', p.endsWith('.glb') ? 'model/gltf-binary' : 'application/octet-stream');
-    reply.header('Cache-Control', 'public, max-age=86400, immutable');
-    return reply.send(createReadStream(p));
-  } catch {
-    return reply.code(404).send({ error: 'tile not found' });
+await app.register(fastifyStatic, {
+  root: DATA_ROOT,
+  prefix: '/tiles/',
+  decorateReply: false,
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.glb')) {
+      res.setHeader('Content-Type', 'model/gltf-binary');
+    } else {
+      res.setHeader('Content-Type', 'application/octet-stream');
+    }
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
   }
 });
 
