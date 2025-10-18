@@ -37,10 +37,12 @@ class TileManager {
     this.tileColorMode = false; // Diagnostic colouring toggle
     this.simpleShadingMode = false; // Optional lambert shading toggle
     this.levelGeMedian = new Map(); // Depth -> geometric error median
+    this.requestPriority = new Map(); // TileId -> SSE-based priority
     this.rootTileIds = new Set();
     this._tickLock = false;
     this._tickPending = false;
     this.manifestVersion = 0;
+    this._queueSeq = 0;
   }
 
   async init(manifestUrl) {
@@ -133,6 +135,8 @@ class TileManager {
     const roots = [...this.byId.values()].filter(t => t.z === 0);
     const want = new Set();
 
+    this.requestPriority.clear();
+
     const visit = (meta) => {
       if (!this._visible(meta)) return;
 
@@ -143,6 +147,8 @@ class TileManager {
         ? sse * (medianGe / Math.max(geoError, 1e-9))
         : sse;
       const hasChildren = (meta.children || []).length > 0;
+
+      this.requestPriority.set(meta.tileId, normalizedSse);
 
       if (hasChildren && normalizedSse > SSE_THRESHOLD_REFINE) {
         replaceParents.add(meta.tileId);
@@ -194,6 +200,7 @@ class TileManager {
 
     this._updateFrustum();
     const { want, replaceParents } = this._decide();
+    this._refreshQueuePriorities();
     if (versionAtStart !== this.manifestVersion) return;
 
     // Ensure roots are always requested
@@ -211,19 +218,19 @@ class TileManager {
     const rootIds = [...this.rootTileIds];
     for (const id of rootIds) {
       if (want.has(id) && !this.tiles.has(id)) {
-        this._enqueue(id);
+        this._enqueue(id, this.requestPriority.get(id));
       }
     }
     for (const id of want) {
       if (this.rootTileIds.has(id)) continue;
       if (!this.tiles.has(id)) {
-        this._enqueue(id);
+        this._enqueue(id, this.requestPriority.get(id));
       }
     }
 
     // Drop any queued requests we no longer need
     if (this.queue.length) {
-      this.queue = this.queue.filter(id => want.has(id));
+      this.queue = this.queue.filter(entry => want.has(entry.id));
     }
     if (versionAtStart !== this.manifestVersion) return;
 
@@ -242,7 +249,8 @@ class TileManager {
     do {
       launched = [];
       while (this.queue.length && this.inflight < MAX_CONCURRENT) {
-        const nextId = this.queue.shift();
+        const nextEntry = this.queue.shift();
+        const nextId = nextEntry.id;
         launched.push(this._load(nextId));
       }
       if (launched.length) {
@@ -298,7 +306,8 @@ class TileManager {
     }
   }
 
-  _enqueue(id) {
+  _enqueue(id, priority = null) {
+    const priorityHint = (priority ?? this.requestPriority.get(id) ?? 0);
     // Check cache first
     if (this.cache.has(id)) {
       const rec = this.cache.get(id);
@@ -330,9 +339,40 @@ class TileManager {
     }
 
     // Avoid duplicate queue entries
-    if (!this.queue.includes(id)) {
-      this.queue.push(id);
+    const existing = this.queue.find(entry => entry.id === id);
+    if (existing) {
+      if (priorityHint !== existing.priority) {
+        existing.priority = priorityHint;
+        this._sortQueue();
+      }
+      return;
     }
+
+    this.queue.push({ id, priority: priorityHint, seq: this._queueSeq++ });
+    this._sortQueue();
+  }
+
+  _refreshQueuePriorities() {
+    let needsSort = false;
+    for (const entry of this.queue) {
+      const updated = this.requestPriority.get(entry.id);
+      if (updated != null && updated !== entry.priority) {
+        entry.priority = updated;
+        needsSort = true;
+      }
+    }
+    if (needsSort) {
+      this._sortQueue();
+    }
+  }
+
+  _sortQueue() {
+    this.queue.sort((a, b) => {
+      if (b.priority !== a.priority) {
+        return b.priority - a.priority;
+      }
+      return a.seq - b.seq;
+    });
   }
 
   async _load(id) {
@@ -666,6 +706,7 @@ class TileManager {
 
     // Clear queue
     this.queue = [];
+    this._queueSeq = 0;
     this.manifest = null;
     this.byId.clear();
   }

@@ -128,7 +128,7 @@ Quick summary (mostly unchanged):
 
 3. **Visibility pre-pass**: Toggle visibility (and helper visibility) for all `this.tiles` based on membership in `want`. Parents that appear in `replaceParents` stay visible while their descendants are still downloading (`_hasPendingDescendants`).
 
-4. **Queue**: Enqueue missing tiles; filter duplicate/stale IDs from `this.queue` so only still-needed tiles remain.
+4. **Queue**: Enqueue missing tiles with their current `normalizedSse` as a priority; pending entries are sorted so higher-error (closer) tiles are requested first while still filtering duplicate/stale IDs.
 
 5. **Removal**: Call `_unload` for any active tile not in `want`. Parents remain visible while any of their wanted descendants are still loading (`_hasPendingDescendants`). Root tiles are always retained as a fallback.
 
