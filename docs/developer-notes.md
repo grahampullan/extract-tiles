@@ -162,7 +162,7 @@ const settings = {
   - Wireframe: sets `material.wireframe` for all meshes in `tiles` and `cache`.
   - Bounding boxes: adds/removes helpers only for active tiles. `updateBoundingBoxVisibility` ensures cached helpers are detached.
   - Tile colours: `_applyTileColor` swaps shading for active tiles using a per-mesh random HSL tint; `_restoreTileMaterial` returns to the stored material when turned off.
-  - Simple shading: `_applySimpleShading` switches meshes to a cached `MeshLambertMaterial` (respecting vertex colours) for softer lighting; turning it off restores or reapplies tile colours as needed.
+  - Simple shading: `_applySimpleShading` switches meshes to a cached `MeshPhongMaterial` (respecting vertex colours) with elevated shininess/specular colour; turning it off restores or reapplies tile colours as needed.
 
 ### 3.5. Extract Selection & Prefetching
 

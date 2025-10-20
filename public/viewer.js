@@ -584,12 +584,16 @@ class TileManager {
         const info = obj.userData.debugInfo;
         if (!info.simpleMaterial) {
           const hasVertexColors = !!(info.originalMaterial && info.originalMaterial.vertexColors);
-          info.simpleMaterial = new THREE.MeshLambertMaterial({
-            color: info.originalMaterial && info.originalMaterial.color
-              ? info.originalMaterial.color.clone()
-              : new THREE.Color(0.8, 0.8, 0.8),
+          const baseColor = info.originalMaterial && info.originalMaterial.color
+            ? info.originalMaterial.color.clone()
+            : new THREE.Color(0.8, 0.8, 0.8);
+          const specularColor = baseColor.clone().lerp(new THREE.Color(1, 1, 1), 0.5);
+          info.simpleMaterial = new THREE.MeshPhongMaterial({
+            color: baseColor,
             vertexColors: hasVertexColors,
-            side: THREE.DoubleSide
+            side: THREE.DoubleSide,
+            shininess: 60,
+            specular: specularColor
           });
         }
         const geom = obj.geometry;
