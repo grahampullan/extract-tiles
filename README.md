@@ -16,6 +16,7 @@ A multi-resolution tiling system for visualizing large triangulated mesh surface
 - **Interactive viewers**:
   - Single-extract viewer with dat.GUI controls for dataset/time selection, LOD tuning, diagnostics, and HUD indicators.
   - Multi-extract viewer for comparing multiple datasets.
+- **Precompressed manifests**: Fastify serves `.json.gz` manifests automatically when present (keep the `.json` fallback alongside it).
 
 ## Installation
 
@@ -146,6 +147,7 @@ extract-tiles/
 └── tiles_out/              # Generated tiles (created by preprocessor)
     └── <extract>/
         ├── manifest_<time>.json
+        ├── manifest_<time>.json.gz  # Optional precompressed manifest (keep alongside .json)
         └── <time>/
             └── z/x/y.glb   # Tile files
 ```
@@ -171,6 +173,8 @@ Each extract generates a manifest JSON file with metadata:
   "tiles": [...]
 }
 ```
+
+If you have large manifests, you can precompress them with `gzip -k manifest_<time>.json`. Keep both the `.json` and `.json.gz` files in place—the Fastify server automatically serves the precompressed payload when the client requests gzip while falling back to the plain JSON when needed.
 
 ## Tile Metadata
 

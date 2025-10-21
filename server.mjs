@@ -1,7 +1,6 @@
 // server.mjs
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import compress from '@fastify/compress';
 import fastifyStatic from '@fastify/static';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -17,7 +16,6 @@ const DATA_ROOT = path.join(__ROOT, 'tiles_out');
 const app = Fastify({ logger: true });
 
 await app.register(cors, { origin: true });
-await app.register(compress, { global: true });
 
 // Viewer
 await app.register(fastifyStatic, {
@@ -45,14 +43,39 @@ await app.register(fastifyStatic, {
 // Manifest
 app.get('/manifest/:extract/:time.json', async (req, reply) => {
   const { extract, time } = req.params;
-  const p = path.join(DATA_ROOT, extract, `manifest_${time}.json`);
+  const basePath = path.join(DATA_ROOT, extract, `manifest_${time}.json`);
+  const gzipPath = `${basePath}.gz`;
+
   try {
-    await fs.access(p);
-    reply.header('Content-Type', 'application/json');
-    reply.header('Cache-Control', 'public, max-age=3600');
-    return reply.send(createReadStream(p));
+    await fs.access(basePath);
   } catch {
     return reply.code(404).send({ error: 'manifest not found' });
+  }
+
+  const acceptEnc = req.headers['accept-encoding'] || '';
+  const wantsGzip = acceptEnc.includes('gzip');
+  req.log.info({ extract, time, acceptEnc, wantsGzip }, 'manifest negotiation');
+
+  try {
+    if (wantsGzip) {
+      try {
+        await fs.access(gzipPath);
+        req.log.info({ extract, time }, 'serving precompressed manifest');
+        reply.header('Content-Encoding', 'gzip');
+        reply.header('Content-Type', 'application/json');
+        reply.header('Cache-Control', 'public, max-age=3600');
+        return reply.send(createReadStream(gzipPath));
+      } catch {
+        // fall through to plain JSON if .gz missing
+      }
+    }
+
+    reply.header('Content-Type', 'application/json');
+    reply.header('Cache-Control', 'public, max-age=3600');
+    return reply.send(createReadStream(basePath));
+  } catch (err) {
+    req.log.error(err);
+    return reply.code(500).send({ error: 'failed to stream manifest' });
   }
 });
 

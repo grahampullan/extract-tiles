@@ -170,6 +170,7 @@ const settings = {
 * `rebuildTimeController` chooses between a discrete dropdown (many timesteps) and a slider (<=100). The slider stores a numeric `timeIndex` so dat.gui can emit integers even though `settings.time` remains stringified for URL construction.
 * `schedulePrefetchNeighbours` determines adjacent timesteps (+/-1, +/-2) and calls `prefetchRootTiles`, which fetches the neighbour manifest and root tile GLBs ahead of time. Prefetched ArrayBuffers live in `prefetchedTileBuffers`, letting `_load` short circuit straight into `GLTFLoader.parse` without another HTTP transfer.
 * Diagnostics interplay: enabling tile colours or simple shading automatically disables the other mode and re-applies the relevant material override to all loaded tiles.
+* Deployment note: the server serves `manifest_<time>.json.gz` automatically when present (keep the plain `.json` alongside it so clients without gzip support still succeed).
 
 ---
 
