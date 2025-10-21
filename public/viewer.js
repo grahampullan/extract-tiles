@@ -978,7 +978,13 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
       settings.time = String(times[0]);
     }
 
-    const useSlider = times.length > 1 && times.length <= 100;
+    if (times.length <= 1) {
+      timeIsSlider = false;
+      settings.time = String(times[0] ?? 0);
+      return;
+    }
+
+    const useSlider = times.length <= 100;
     timeIsSlider = useSlider;
     if (useSlider) {
       const min = Math.min(...times);
