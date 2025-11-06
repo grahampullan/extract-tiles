@@ -1,6 +1,7 @@
-resources/
-tiles_out/
-node_modules/
+/resources/
+/tiles_out/
+/node_modules/
 # Large generated assets
-examples/**/*.glb
+/examples/**/*.glb
+/examples/**/*.gltf
 examples/dns*/
