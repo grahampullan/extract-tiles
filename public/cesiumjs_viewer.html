@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>CesiumJS Tileset Preview</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.118/Build/Cesium/Widgets/widgets.css" />
+  <style>
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #1a1a1a;
+      color: #f5f5f5;
+    }
+    #toolbar {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 10;
+      background: rgba(24, 24, 24, 0.9);
+      padding: 12px 14px;
+      border-radius: 6px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    #toolbar label {
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-right: 4px;
+    }
+    #tilesetUrl,
+    .offset-input,
+    .scale-input {
+      width: 260px;
+      max-width: 55vw;
+      padding: 6px 8px;
+      border-radius: 4px;
+      border: 1px solid #444;
+      background: #111;
+      color: #f5f5f5;
+    }
+    .offset-input {
+      width: 80px;
+    }
+    .scale-input {
+      width: 80px;
+    }
+    #loadBtn,
+    #offsetBtn,
+    #scaleBtn,
+    .debug-toggle {
+      padding: 6px 12px;
+      border: none;
+      border-radius: 4px;
+      background: #4094ff;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #loadBtn:disabled,
+    #offsetBtn:disabled,
+    #scaleBtn:disabled {
+      opacity: 0.6;
+      cursor: progress;
+    }
+    .debug-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(64, 148, 255, 0.12);
+      color: #f5f5f5;
+      font-weight: 500;
+    }
+    .debug-toggle input {
+      margin: 0;
+    }
+    #status {
+      font-size: 0.8rem;
+      margin-left: 6px;
+      min-width: 160px;
+      color: #cccccc;
+    }
+    #cesiumContainer {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    a {
+      color: #7ab6ff;
+    }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <label for="tilesetUrl">Tileset URL</label>
+    <input id="tilesetUrl" type="text" placeholder="/tiles_out/example/tileset_0.json" />
+    <button id="loadBtn">Load</button>
+    <label for="offsetX">Offset</label>
+    <input id="offsetX" class="offset-input" type="number" step="0.1" value="0" title="X offset (meters)" />
+    <input id="offsetY" class="offset-input" type="number" step="0.1" value="0" title="Y offset (meters)" />
+    <input id="offsetZ" class="offset-input" type="number" step="0.1" value="0" title="Z offset (meters)" />
+    <button id="offsetBtn">Apply</button>
+    <label for="scaleInput">Scale</label>
+    <input id="scaleInput" class="scale-input" type="number" step="0.1" value="1" title="Uniform scale factor" />
+    <button id="scaleBtn">Set</button>
+    <label class="debug-toggle"><input id="wireframeToggle" type="checkbox" /> Wireframe</label>
+    <label class="debug-toggle"><input id="bboxToggle" type="checkbox" /> Bounding Boxes</label>
+    <span id="status"></span>
+  </div>
+  <div id="cesiumContainer"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/cesium@1.118/Build/Cesium/Cesium.js"></script>
+  <script>
+    // Disable default Cesium Ion requests; we only render local content.
+    Cesium.Ion.defaultAccessToken = "";
+
+    // Opt into 3D Tiles Next content (GLB payloads via 3DTILES_content_gltf).
+    if (Cesium.ExperimentalFeatures) {
+      const experimental = Cesium.ExperimentalFeatures;
+      if ("enableModelExperimental" in experimental) {
+        experimental.enableModelExperimental = true;
+      }
+      if ("enableCesium3DTilesNext" in experimental) {
+        experimental.enableCesium3DTilesNext = true;
+      }
+      if ("enable3dTilesNext" in experimental) {
+        experimental.enable3dTilesNext = true;
+      }
+      if ("enableMetadata" in experimental) {
+        experimental.enableMetadata = true;
+      }
+    }
+
+    const viewer = new Cesium.Viewer("cesiumContainer", {
+      timeline: false,
+      animation: false,
+      geocoder: false,
+      baseLayerPicker: false,
+      sceneModePicker: false,
+      navigationHelpButton: false,
+      homeButton: false,
+      fullscreenButton: true,
+      infoBox: false,
+      selectionIndicator: false,
+      imageryProvider: false,
+      terrainProvider: Cesium.EllipsoidTerrainProvider(),
+    });
+
+    viewer.scene.globe.show = false; // keep focus on loaded tileset
+
+    let currentTileset = null;
+    let baseModelMatrix = null;
+    const scratchScale = new Cesium.Cartesian3();
+
+    const tilesetInput = document.getElementById("tilesetUrl");
+    const loadBtn = document.getElementById("loadBtn");
+    const status = document.getElementById("status");
+    const offsetXInput = document.getElementById("offsetX");
+    const offsetYInput = document.getElementById("offsetY");
+    const offsetZInput = document.getElementById("offsetZ");
+    const offsetBtn = document.getElementById("offsetBtn");
+    const scaleInput = document.getElementById("scaleInput");
+    const scaleBtn = document.getElementById("scaleBtn");
+    const wireframeToggle = document.getElementById("wireframeToggle");
+    const bboxToggle = document.getElementById("bboxToggle");
+
+    const params = new URLSearchParams(window.location.search);
+    const preset = params.get("tileset");
+   if (preset) {
+     tilesetInput.value = preset;
+   }
+
+   async function loadTileset(url) {
+      if (!url) {
+        status.textContent = "Provide a tileset.json URL";
+        return;
+      }
+      loadBtn.disabled = true;
+      status.textContent = "Loading…";
+      try {
+        const options = {
+          maximumScreenSpaceError: 16,
+          projectTo2D: false,
+        };
+        if (currentTileset) {
+          viewer.scene.primitives.remove(currentTileset);
+          currentTileset = null;
+        }
+        const tileset = await Cesium.Cesium3DTileset.fromUrl(url, options);
+       viewer.scene.primitives.add(tileset);
+        currentTileset = tileset;
+        await tileset.readyPromise;
+        currentTileset.debugShowStatistics = true;
+        baseModelMatrix = Cesium.Matrix4.clone(tileset.modelMatrix);
+        offsetXInput.value = offsetYInput.value = offsetZInput.value = "0";
+        scaleInput.value = "1";
+        applyDebugToggles();
+        await viewer.zoomTo(tileset);
+        clampCameraForTileset();
+        ensureFrustumClamp();
+        status.textContent = "Loaded";
+      } catch (err) {
+        console.error("Failed to load tileset", err);
+        status.innerHTML = `Error: ${err.message || err}`;
+      } finally {
+        loadBtn.disabled = false;
+      }
+    }
+
+    function applyOffset() {
+      if (!currentTileset || !baseModelMatrix) {
+        status.textContent = "Load a tileset first";
+        return;
+      }
+      updateModelMatrix();
+      const dx = Number(offsetXInput.value) || 0;
+      const dy = Number(offsetYInput.value) || 0;
+      const dz = Number(offsetZInput.value) || 0;
+      status.textContent = `Offset applied (${dx.toFixed(2)}, ${dy.toFixed(2)}, ${dz.toFixed(2)})`;
+      clampCameraForTileset();
+      ensureFrustumClamp();
+    }
+
+    loadBtn.addEventListener("click", () => loadTileset(tilesetInput.value.trim()));
+    offsetBtn.addEventListener("click", applyOffset);
+    scaleBtn.addEventListener("click", applyScale);
+    [offsetXInput, offsetYInput, offsetZInput].forEach(input => {
+      input.addEventListener("keydown", (evt) => {
+        if (evt.key === "Enter") {
+          applyOffset();
+        }
+      });
+    });
+    scaleInput.addEventListener("keydown", (evt) => {
+      if (evt.key === "Enter") {
+        applyScale();
+      }
+    });
+    wireframeToggle.addEventListener("change", () => {
+      if (!currentTileset) return;
+      currentTileset.debugWireframe = wireframeToggle.checked;
+    });
+    bboxToggle.addEventListener("change", () => {
+      if (!currentTileset) return;
+      currentTileset.debugShowBoundingVolume = bboxToggle.checked;
+    });
+
+    tilesetInput.addEventListener("keydown", (evt) => {
+      if (evt.key === "Enter") {
+        loadTileset(tilesetInput.value.trim());
+      }
+    });
+
+    if (tilesetInput.value) {
+      loadTileset(tilesetInput.value.trim());
+    }
+
+    function applyDebugToggles() {
+      if (!currentTileset) return;
+      currentTileset.debugWireframe = wireframeToggle.checked;
+      currentTileset.debugShowBoundingVolume = bboxToggle.checked;
+    }
+
+    let frustumClampHandler = null;
+
+    function ensureFrustumClamp() {
+      if (frustumClampHandler) return;
+      frustumClampHandler = viewer.scene.preUpdate.addEventListener(() => {
+        if (!currentTileset) return;
+        const bs = currentTileset.boundingSphere;
+        if (!bs || !Cesium.defined(bs.radius) || bs.radius <= 0) return;
+
+        const inverse = Cesium.Matrix4.inverseTransformation(currentTileset.modelMatrix, new Cesium.Matrix4());
+        const cameraLocal = Cesium.Matrix4.multiplyByPoint(inverse, viewer.scene.camera.positionWC, new Cesium.Cartesian3());
+        const centerLocal = Cesium.Matrix4.multiplyByPoint(inverse, bs.center, new Cesium.Cartesian3());
+        const distLocal = Cesium.Cartesian3.distance(cameraLocal, centerLocal);
+
+        const radius = Math.max(bs.radius, 1e-3);
+        const cushion = radius * 4.0;
+        const near = Math.max(distLocal - cushion, 0.05);
+        const far = Math.max(distLocal + radius * 20.0, near + 50.0);
+
+        const frustum = viewer.scene.camera.frustum;
+        frustum.near = near;
+        frustum.far = far;
+      });
+    }
+
+    async function applyScale() {
+      if (!currentTileset || !baseModelMatrix) {
+        status.textContent = "Load a tileset first";
+        return;
+      }
+      const scale = Number(scaleInput.value);
+      if (!Number.isFinite(scale) || scale <= 0) {
+        status.textContent = "Scale must be positive";
+        return;
+      }
+      updateModelMatrix();
+      status.textContent = `Scale set to ${scale}`;
+      try {
+        await viewer.zoomTo(currentTileset);
+      } catch (err) {
+        console.warn('zoomTo after scale failed', err);
+      }
+      clampCameraForTileset();
+      ensureFrustumClamp();
+    }
+
+    function updateModelMatrix() {
+      if (!currentTileset || !baseModelMatrix) return;
+      const dx = Number(offsetXInput.value) || 0;
+      const dy = Number(offsetYInput.value) || 0;
+      const dz = Number(offsetZInput.value) || 0;
+      const scale = Number(scaleInput.value) || 1;
+      const translation = Cesium.Matrix4.fromTranslation(
+        Cesium.Cartesian3.fromElements(dx, dy, dz)
+      );
+      const scaleMatrix = Cesium.Matrix4.fromUniformScale(scale);
+      const transform = Cesium.Matrix4.multiply(translation, scaleMatrix, new Cesium.Matrix4());
+      currentTileset.modelMatrix = Cesium.Matrix4.multiply(baseModelMatrix, transform, new Cesium.Matrix4());
+    }
+
+    function clampCameraForTileset() {
+      if (!currentTileset) return;
+      const bs = currentTileset.boundingSphere;
+      if (!bs || !Cesium.defined(bs.radius) || bs.radius <= 0) {
+        return;
+      }
+      const inverse = Cesium.Matrix4.inverseTransformation(currentTileset.modelMatrix, new Cesium.Matrix4());
+      const cameraLocal = Cesium.Matrix4.multiplyByPoint(inverse, viewer.scene.camera.positionWC, new Cesium.Cartesian3());
+      const centerLocal = Cesium.Matrix4.multiplyByPoint(inverse, bs.center, new Cesium.Cartesian3());
+      const distLocal = Cesium.Cartesian3.distance(cameraLocal, centerLocal);
+      const radius = Math.max(bs.radius, 1e-3);
+      const cushion = radius * 4.0;
+      const nearLimit = Math.max(distLocal - cushion, 0.05);
+      const farLimit = Math.max(distLocal + radius * 20.0, nearLimit + 50.0);
+      const controller = viewer.scene.screenSpaceCameraController;
+      controller.minimumZoomDistance = Math.max(radius * 0.1, 0.01);
+      controller.maximumZoomDistance = farLimit;
+      const frustum = viewer.scene.camera.frustum;
+      frustum.near = nearLimit;
+      frustum.far = farLimit;
+    }
+  </script>
+</body>
+</html>

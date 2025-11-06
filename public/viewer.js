@@ -770,7 +770,7 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
 
   // Setup scene
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xdddddd); // Light grey for clearer wireframe contrast
+  scene.background = new THREE.Color(0x000000); 
 
   // Setup camera
   const camera = new THREE.PerspectiveCamera(

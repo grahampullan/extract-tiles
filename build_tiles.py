@@ -12,7 +12,7 @@ import base64
 import argparse
 import io
 from pathlib import Path
-from typing import List, Tuple, Dict, Optional
+from typing import Any, List, Tuple, Dict, Optional
 import numpy as np
 import trimesh as tm
 import open3d as o3d
@@ -582,6 +582,218 @@ def estimate_bytes(nv, nf, has_uv=True, has_col=True):
     per_f = 12
     return nv*per_v + nf*per_f + 1024  # small header fudge
 
+
+def _aabb_to_box(aabb: List[List[float]]) -> List[float]:
+    """Convert an axis-aligned bounding box [[min],[max]] to a 3D Tiles box array."""
+    if not aabb or len(aabb) != 2:
+        raise ValueError("Expected aabb as [[min],[max]] with two entries")
+    mn, mx = aabb
+    cx = 0.5 * (float(mn[0]) + float(mx[0]))
+    cy = 0.5 * (float(mn[1]) + float(mx[1]))
+    cz = 0.5 * (float(mn[2]) + float(mx[2]))
+    hx = 0.5 * (float(mx[0]) - float(mn[0]))
+    hy = 0.5 * (float(mx[1]) - float(mn[1]))
+    hz = 0.5 * (float(mx[2]) - float(mn[2]))
+    return [
+        cx, cy, cz,
+        hx, 0.0, 0.0,
+        0.0, hy, 0.0,
+        0.0, 0.0, hz,
+    ]
+
+
+def _union_aabbs(bounds: List[List[List[float]]]) -> List[List[float]]:
+    """Compute the union of multiple axis-aligned bounding boxes."""
+    if not bounds:
+        raise ValueError("Cannot union empty bounds list")
+    min_x = min(float(b[0][0]) for b in bounds)
+    min_y = min(float(b[0][1]) for b in bounds)
+    min_z = min(float(b[0][2]) for b in bounds)
+    max_x = max(float(b[1][0]) for b in bounds)
+    max_y = max(float(b[1][1]) for b in bounds)
+    max_z = max(float(b[1][2]) for b in bounds)
+    return [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+
+
+def _tile_uri_relative(manifest_dir: Path, url: Optional[str]) -> Optional[str]:
+    """Convert a manifest URL to a path relative to the tileset directory."""
+    if not url:
+        return None
+    rel = url.lstrip("/")
+    parts = Path(rel).parts
+    if parts and parts[0] == "tiles":
+        parts = parts[1:]
+    if parts and parts[0] == manifest_dir.name:
+        parts = parts[1:]
+    if not parts:
+        return None
+    return "/".join(parts)
+
+
+def mat4_to_column_major(mat: List[List[float]]) -> List[float]:
+    """Flatten a 4x4 row-major matrix into column-major order."""
+    if len(mat) != 4 or any(len(row) != 4 for row in mat):
+        raise ValueError("Expected 4x4 matrix")
+    return [mat[r][c] for c in range(4) for r in range(4)]
+
+
+def make_uniform_scale_matrix(scale: float) -> List[float]:
+    """Return column-major matrix representing uniform scale."""
+    return [
+        scale, 0.0,   0.0,   0.0,
+        0.0,   scale, 0.0,   0.0,
+        0.0,   0.0,   scale, 0.0,
+        0.0,   0.0,   0.0,   1.0,
+    ]
+
+
+def make_enu_transform(lat_deg: float, lon_deg: float, height_m: float, scale: float = 1.0) -> List[float]:
+    """Create a column-major ENU transform matrix based on WGS84 coordinates."""
+    lat = math.radians(lat_deg)
+    lon = math.radians(lon_deg)
+    h = height_m
+
+    a = 6378137.0  # WGS84 semi-major axis
+    f = 1.0 / 298.257223563
+    e2 = f * (2.0 - f)
+
+    sin_lat = math.sin(lat)
+    cos_lat = math.cos(lat)
+    sin_lon = math.sin(lon)
+    cos_lon = math.cos(lon)
+
+    N = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
+    x0 = (N + h) * cos_lat * cos_lon
+    y0 = (N + h) * cos_lat * sin_lon
+    z0 = (N * (1.0 - e2) + h) * sin_lat
+
+    east = (-sin_lon, cos_lon, 0.0)
+    north = (-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat)
+    up = (cos_lat * cos_lon, cos_lat * sin_lon, sin_lat)
+
+    sx = scale
+    sy = scale
+    sz = scale
+
+    mat_rows = [
+        [east[0] * sx, north[0] * sy, up[0] * sz, x0],
+        [east[1] * sx, north[1] * sy, up[1] * sz, y0],
+        [east[2] * sx, north[2] * sy, up[2] * sz, z0],
+        [0.0,           0.0,           0.0,          1.0],
+    ]
+    return mat4_to_column_major(mat_rows)
+
+
+def write_3dtiles_tileset(manifest: Dict[str, Any], manifest_path: str,
+                          output_path: Optional[str] = None,
+                          root_transform: Optional[List[float]] = None,
+                          transform_info: Optional[Dict[str, Any]] = None) -> Path:
+    """Emit a Cesium 3D Tiles 1.1 tileset.json referencing GLB tile content."""
+    manifest_dir = Path(manifest_path).parent
+    tiles = manifest.get("tiles", [])
+    if not tiles:
+        raise ValueError("Manifest contains no tiles to export")
+
+    tile_lookup: Dict[str, Dict[str, Any]] = {
+        tile["tileId"]: tile for tile in tiles if "tileId" in tile
+    }
+    if not tile_lookup:
+        raise ValueError("Manifest tiles are missing tileId entries")
+
+    children_map: Dict[str, List[str]] = {}
+    for tile_id, tile in tile_lookup.items():
+        kids = [cid for cid in (tile.get("children") or []) if cid in tile_lookup]
+        children_map[tile_id] = kids
+
+    def build_node(tile_id: str) -> Dict[str, Any]:
+        tile = tile_lookup[tile_id]
+        aabb = tile.get("aabbWorld")
+        if aabb is None:
+            raise ValueError(f"Tile '{tile_id}' is missing 'aabbWorld' for tileset export")
+        node: Dict[str, Any] = {
+            "boundingVolume": {"box": _aabb_to_box(aabb)},
+            "geometricError": float(tile.get("geometricError", 0.0) or 0.0),
+            "refine": "REPLACE",
+        }
+        uri = _tile_uri_relative(manifest_dir, tile.get("url"))
+        if uri:
+            node["content"] = {
+                "uri": uri,
+                "extensions": {
+                    "3DTILES_content_gltf": {}
+                },
+            }
+        child_nodes = [build_node(cid) for cid in children_map.get(tile_id, [])]
+        if child_nodes:
+            node["children"] = child_nodes
+        return node
+
+    root_ids = [tile_id for tile_id, tile in tile_lookup.items() if not tile.get("parent")]
+    if not root_ids:
+        raise ValueError("Manifest does not identify any root tiles (parent == None)")
+
+    if len(root_ids) == 1:
+        root_node = build_node(root_ids[0])
+    else:
+        child_nodes = [build_node(rid) for rid in root_ids]
+        union_bounds = _union_aabbs([tile_lookup[rid]["aabbWorld"] for rid in root_ids])
+        root_ge = max((cn.get("geometricError", 0.0) for cn in child_nodes), default=0.0)
+        if root_ge <= 0.0:
+            root_ge = max((float(tile.get("geometricError", 0.0)) for tile in tiles), default=1.0)
+            if root_ge <= 0.0:
+                root_ge = 1.0
+        root_node = {
+            "boundingVolume": {"box": _aabb_to_box(union_bounds)},
+            "geometricError": float(root_ge),
+            "refine": "REPLACE",
+            "children": child_nodes,
+        }
+
+    if not root_node.get("geometricError"):
+        # Ensure non-zero geometric error for root to allow refinement.
+        root_node["geometricError"] = max(
+            root_node.get("geometricError", 0.0),
+            max((float(tile.get("geometricError", 0.0)) for tile in tiles), default=1.0) or 1.0,
+        )
+
+    tileset = {
+        "asset": {
+            "version": "1.1",
+            "gltfUpAxis": "Z",
+        },
+        "extensionsUsed": ["3DTILES_content_gltf"],
+        "extensionsRequired": ["3DTILES_content_gltf"],
+        "geometricError": float(root_node.get("geometricError", 0.0) or 1.0),
+        "root": root_node,
+        "extras": {
+            "sourceManifest": os.path.basename(manifest_path),
+            "extract": manifest.get("extract"),
+            "time": manifest.get("time"),
+            "tilingSpace": manifest.get("tilingSpace"),
+        },
+    }
+
+    if root_transform is not None:
+        if len(root_transform) != 16:
+            raise ValueError("root_transform must have 16 elements")
+        tileset["root"]["transform"] = root_transform
+        if transform_info:
+            tileset["extras"]["rootTransform"] = transform_info
+    elif transform_info:
+        tileset["extras"]["rootTransform"] = transform_info
+
+    if output_path is None:
+        time_idx = manifest.get("time", 0)
+        output_path = Path(manifest_path).with_name(f"tileset_{time_idx}.json")
+    else:
+        output_path = Path(output_path)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w") as fp:
+        json.dump(tileset, fp, indent=2)
+
+    return output_path
+
 def decimate_to_target(m: tm.Trimesh, target_bytes, min_ratio=0.02, min_tris=32, max_iter=6):
     """Iteratively decimate mesh until it meets the target byte budget."""
     src_uv = getattr(m.visual, 'uv', None)
@@ -702,6 +914,12 @@ def write_glb_from_trimesh(m: tm.Trimesh, meta: dict, out_path: str):
     indices  = indices32.astype(np.uint16 if use_u16 else np.uint32, copy=False)
 
     gltf = GLTF2(asset=Asset(version="2.0"))
+    try:
+        setattr(gltf.asset, "gltfUpAxis", "Z")
+    except Exception:
+        if not isinstance(gltf.asset.extras, dict):
+            gltf.asset.extras = {}
+        gltf.asset.extras["gltfUpAxis"] = "Z"
     chunks, offsets = [], {}
 
     def push(name, data_bytes):
@@ -843,7 +1061,10 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                       snap_radius=None, snap_ratio=None,
                       skip_leaf_decimation=False,
                       min_ratio=0.02, min_tris=32, max_iter=6,
-                      root_voxel_ratio=None, root_voxel_trigger=4.0):
+                      root_voxel_ratio=None, root_voxel_trigger=4.0,
+                      write_tileset=False,
+                      tileset_transform=None,
+                      tileset_transform_info=None):
     """Build UV-based quadtree tiles"""
     mesh_entries = []
     if split_meshes:
@@ -1020,6 +1241,15 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
     with open(man_path, "w") as f:
         json.dump(manifest, f, indent=2)
 
+    if write_tileset:
+        tileset_path = write_3dtiles_tileset(
+            manifest,
+            man_path,
+            root_transform=tileset_transform,
+            transform_info=tileset_transform_info,
+        )
+        print(f"Wrote 3D Tiles tileset to {tileset_path}")
+
     print(f"Generated {len(all_tiles)} UV-quadtree tiles across {len(mesh_entries)} mesh charts")
     size_only = [size for (_, size) in depth_size_samples]
     summarize_tile_sizes(size_only, heading=f"Tile sizes for '{extract}' (uv)")
@@ -1091,7 +1321,10 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                        preserve_borders=False, snap_radius=None, snap_ratio=None,
                        skip_leaf_decimation=False,
                        min_ratio=0.02, min_tris=32, max_iter=6,
-                       root_voxel_ratio=None, root_voxel_trigger=4.0):
+                       root_voxel_ratio=None, root_voxel_trigger=4.0,
+                       write_tileset=False,
+                       tileset_transform=None,
+                       tileset_transform_info=None):
     """Build world-space octree tiles"""
     pos, uv, col, idx = load_glb_arrays(src_glb)
 
@@ -1222,6 +1455,15 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
 
     with open(man_path, "w") as f:
         json.dump(manifest, f, indent=2)
+
+    if write_tileset:
+        tileset_path = write_3dtiles_tileset(
+            manifest,
+            man_path,
+            root_transform=tileset_transform,
+            transform_info=tileset_transform_info,
+        )
+        print(f"Wrote 3D Tiles tileset to {tileset_path}")
 
     print(f"Generated {len(tiles_meta)} world-octree tiles")
     size_only = [size for (_, size) in depth_size_samples]
@@ -1356,6 +1598,12 @@ def main():
                         help='If set, fallback voxel clustering ratio (fraction of bounding box diagonal) for root tiles when decimation cannot reach target size')
     parser.add_argument('--root_voxel_trigger', type=float, default=4.0,
                         help='Multiplier of target bytes that triggers root voxel clustering (default 4x target)')
+    parser.add_argument('--write_tileset', action='store_true',
+                       help='Emit a Cesium 3D Tiles 1.1 tileset.json referencing the generated GLB tiles')
+    parser.add_argument('--tileset-origin', type=str, default=None,
+                       help='WGS84 lat,lon[,height] for placing the tileset root in an ENU frame (degrees, meters)')
+    parser.add_argument('--tileset-scale', type=float, default=1.0,
+                       help='Uniform scale factor applied at the tileset root when --write_tileset is used (default 1.0)')
 
     args = parser.parse_args()
 
@@ -1379,6 +1627,37 @@ def main():
     if args.preserve_borders and snap_radius is None and snap_ratio is None:
         snap_ratio = 1e-3  # default relative tolerance
 
+    tileset_transform = None
+    tileset_transform_info = None
+    tileset_scale = args.tileset_scale if args.tileset_scale is not None else 1.0
+    if tileset_scale <= 0:
+        raise ValueError('--tileset-scale must be positive')
+    if args.write_tileset:
+        if args.tileset_origin:
+            parts = [p.strip() for p in args.tileset_origin.split(',') if p.strip()]
+            if len(parts) < 2:
+                raise ValueError('--tileset-origin expects at least "lat,lon"')
+            try:
+                lat = float(parts[0])
+                lon = float(parts[1])
+                height = float(parts[2]) if len(parts) > 2 else 0.0
+            except ValueError as exc:
+                raise ValueError('--tileset-origin must be numeric "lat,lon[,height]"') from exc
+            tileset_transform = make_enu_transform(lat, lon, height, tileset_scale)
+            tileset_transform_info = {
+                "mode": "ENU",
+                "lat": lat,
+                "lon": lon,
+                "height": height,
+                "scale": tileset_scale,
+            }
+        elif abs(tileset_scale - 1.0) > 1e-9:
+            tileset_transform = make_uniform_scale_matrix(tileset_scale)
+            tileset_transform_info = {
+                "mode": "SCALE",
+                "scale": tileset_scale,
+            }
+
     def process_single(glb_path: str, time_idx: int):
         if args.min_ratio is not None and args.min_ratio <= 0:
             raise ValueError('--min_ratio must be positive')
@@ -1400,7 +1679,10 @@ def main():
                 min_tris=args.min_tris,
                 max_iter=args.max_iter,
                 root_voxel_ratio=args.root_voxel_ratio,
-                root_voxel_trigger=args.root_voxel_trigger
+                root_voxel_trigger=args.root_voxel_trigger,
+                write_tileset=args.write_tileset,
+                tileset_transform=tileset_transform,
+                tileset_transform_info=tileset_transform_info,
             )
         else:
             if args.split_meshes:
@@ -1416,7 +1698,10 @@ def main():
                 min_tris=args.min_tris,
                 max_iter=args.max_iter,
                 root_voxel_ratio=args.root_voxel_ratio,
-                root_voxel_trigger=args.root_voxel_trigger
+                root_voxel_trigger=args.root_voxel_trigger,
+                write_tileset=args.write_tileset,
+                tileset_transform=tileset_transform,
+                tileset_transform_info=tileset_transform_info,
             )
 
     if args.snapshots:

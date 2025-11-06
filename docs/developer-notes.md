@@ -24,7 +24,7 @@ This document explains how the tiler and viewer work under the hood. It dives in
 
 ### 1.3. `build_uv_quadtree`
 
-**Signature**: `build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0, max_depth=5, target_bytes=200_000, split_meshes=False, preserve_borders=False, snap_radius=None, snap_ratio=None)`
+**Signature**: `build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0, max_depth=5, target_bytes=200_000, split_meshes=False, preserve_borders=False, snap_radius=None, snap_ratio=None, write_tileset=False)`
 
 | Step | Details |
 | --- | --- |
@@ -46,7 +46,31 @@ Similar structure but partitions using world-space AABBs instead of UV quads. Ke
 
 ### 1.5. CLI (`main`)
 
-* Builds the `argparse` parser with shared flags. Notable options now include `--tiling_space`, `--split_meshes`, `--preserve_borders`, `--snap_radius`, `--snap_ratio`, plus snapshot helpers `--snapshots` and `--input_dir` (process sequential time steps) alongside the direct `--in_glb` path.
+* Builds the `argparse` parser with shared flags. Notable options now include `--tiling_space`, `--split_meshes`, `--preserve_borders`, `--snap_radius`, `--snap_ratio`, plus snapshot helpers `--snapshots` and `--input_dir` (process sequential time steps) alongside the direct `--in_glb` path. `--write_tileset` emits a companion 3D Tiles 1.1 `tileset.json` that references the generated GLB content via `3DTILES_content_gltf`, making the output consumable by CesiumJS and other Next-ready viewers. When that flag is set you can additionally use `--tileset-origin lat,lon[,height]` to position the tileset root in an ENU frame on Earth and `--tileset-scale` for a uniform scale at the root transform (both leave the per-tile GLBs untouched so the in-house viewer keeps working with the manifest).
+
+  Typical command for the oblique single-cylinder UV dataset:
+
+  ```bash
+  python3 build_tiles.py \
+    --in_glb examples/single_cylinder/single_cylinder.glb \
+    --tiling_space uv \
+    --out_dir tiles_out \
+    --extract single-cylinder-uv \
+    --max_depth 4 \
+    --target_kb 100 \
+    --preserve_borders \
+    --snap_ratio 0.001 \
+    --skip_leaf_decimation \
+    --min_ratio 0.002 \
+    --min_tris 8 \
+    --max_iter 6 \
+    --root_voxel_ratio 0.02 \
+    --root_voxel_trigger 4 \
+    --write_tileset \
+    --tileset-origin 52.2053,0.1218,0.0
+  ```
+
+  The command above mirrors the workflow used to generate the CesiumJS tileset during debugging; adjust `--tileset-origin` (and optionally `--tileset-scale`) for other geographic placements.
 * Normalises sizes (`target_bytes` = KB × 1024) and validates snap tolerances (`--snap_ratio`, `--snap_radius`). If `--preserve_borders` is enabled without an explicit tolerance the code falls back to a default `snap_ratio` of `1e-3`.
 * Dispatches to UV or world builder through an inner `process_single`. When `--snapshots` is set it sorts all `*.glb` files in the input directory, increments `time` per file, and invokes `process_single` for each. World-space tiling still rejects `--split_meshes`. The flag `--skip_leaf_decimation` skips `decimate_to_target` for tiles at `max_depth` so leaves retain the original geometry. Additional decimation knobs expose the reduction floor: `--min_ratio` (default 0.02), `--min_tris` (default 32), and `--max_iter` (default 6) let you tighten those limits. A root fallback (`--root_voxel_ratio` + `--root_voxel_trigger`) runs voxel clustering on z=0 tiles when the quadric decimator can’t hit the byte target, producing a lightweight preview without affecting deeper levels.
 * Prior to extracting arrays we bake any `baseColorTexture` images into per-vertex `COLOR_0` attributes (via Pillow + PyGLTFLib). That way world-space tiles carry colours even though we drop UVs/textures downstream.

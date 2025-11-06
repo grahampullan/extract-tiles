@@ -1,4 +1,4 @@
-# Extract-Tiles System
+# Extract-Tiles
 
 A multi-resolution tiling system for visualizing large triangulated mesh surfaces from CFD simulations. This implementation follows the concepts from Graham Pullan's AIAA paper on visualization of aerospace simulations using a navigation approach.
 
@@ -90,8 +90,37 @@ python3 build_tiles.py \
 - `--max_iter`: Maximum number of decimation iterations per tile (default 6)
 - `--root_voxel_ratio`: (optional) fraction of the root tile bounding-box diagonal to use for voxel clustering fallback when decimation cannot hit the byte target
 - `--root_voxel_trigger`: Multiple of the byte target that triggers the voxel clustering fallback (default 4x)
+- `--write_tileset`: Emit a 3D Tiles 1.1 `tileset_<time>.json` alongside the manifest (uses the `3DTILES_content_gltf` extension to point at the existing GLB tiles)
+- `--tileset-origin`: When used with `--write_tileset`, place the tileset root in an ENU frame centred on the supplied WGS84 `lat,lon[,height]`
+- `--tileset-scale`: Optional uniform scale factor applied at the tileset root (default 1.0)
 
 During import, any PBR base-colour textures are baked into per-vertex `COLOR_0` attributes so that world-space tiles can render with colour without shipping textures.
+
+#### Example: UV tiles ready for the CesiumJS viewer
+
+To reproduce the oblique-cylinder dataset (with border preservation, tuned decimation knobs, and a tileset placed over Cambridge, UK) run:
+
+```bash
+python3 build_tiles.py \
+  --in_glb examples/single_cylinder/single_cylinder.glb \
+  --tiling_space uv \
+  --out_dir tiles_out \
+  --extract single-cylinder-uv \
+  --max_depth 4 \
+  --target_kb 100 \
+  --preserve_borders \
+  --snap_ratio 0.001 \
+  --skip_leaf_decimation \
+  --min_ratio 0.002 \
+  --min_tris 8 \
+  --max_iter 6 \
+  --root_voxel_ratio 0.02 \
+  --root_voxel_trigger 4 \
+  --write_tileset \
+  --tileset-origin 52.2053,0.1218,0.0
+```
+
+The `--write_tileset` flag emits a 3D Tiles 1.1 `tileset_<time>.json` alongside the manifest and points at the generated GLB tiles via the `3DTILES_content_gltf` extension. `--tileset-origin` positions the tileset in an ENU frame centred on the supplied WGS84 latitude/longitude (height is optional, metres). Use `--tileset-scale <factor>` if you need a uniform scale baked into that root transform.
 
 ### Unsteady datasets
 
