@@ -115,8 +115,7 @@ python3 build_tiles.py \
   --min_tris 8 \
   --max_iter 6 \
   --root_voxel_ratio 0.02 \
-  --root_voxel_trigger 4 \
-  --write_tileset
+  --root_voxel_trigger 4 
 ```
 
 Those switches keep the deepest tiles at full fidelity, aggressively snap borders, and emit both the manifest and a 3D Tiles tileset. Drop the flags you don’t need or tweak the depth/target size to suit your dataset.
