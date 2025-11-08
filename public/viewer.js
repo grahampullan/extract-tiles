@@ -13,6 +13,55 @@ const MAX_CONCURRENT = 6;
 const MAX_CACHE_BYTES = 600 * 1024 * 1024; // ~600 MB budget
 const MAX_TILES = 500;
 
+function deduceTileBaseUrl(manifestUrl, manifest) {
+  if (!manifestUrl) return null;
+  try {
+    const absoluteManifestUrl = new URL(manifestUrl, window.location.href);
+
+    if (manifest && typeof manifest.tilesBasePath === "string" && manifest.tilesBasePath.length) {
+      return new URL(manifest.tilesBasePath, absoluteManifestUrl).href;
+    }
+
+    const manifestDirUrl = new URL("./", absoluteManifestUrl);
+    const dirParts = manifestDirUrl.pathname.split("/").filter(Boolean);
+    const manifestIdx = dirParts.indexOf("manifest");
+
+    if (manifestIdx !== -1) {
+      const swapped = [...dirParts];
+      swapped[manifestIdx] = "tiles";
+      const path = `/${swapped.join("/")}/`;
+      return new URL(path, absoluteManifestUrl).href;
+    }
+
+    return manifestDirUrl.href;
+  } catch (err) {
+    console.warn("Failed to deduce tile base URL", manifestUrl, err);
+    return null;
+  }
+}
+
+function resolveTileUrl(rawUrl, tileBaseUrl) {
+  if (!rawUrl) return null;
+  if (/^https?:\/\//i.test(rawUrl)) {
+    return rawUrl;
+  }
+  if (rawUrl.startsWith("//")) {
+    return `${window.location.protocol}${rawUrl}`;
+  }
+  if (rawUrl.startsWith("/")) {
+    return rawUrl;
+  }
+  if (!tileBaseUrl) {
+    return rawUrl;
+  }
+  try {
+    return new URL(rawUrl, tileBaseUrl).href;
+  } catch (err) {
+    console.warn("Failed to resolve tile URL", rawUrl, tileBaseUrl, err);
+    return rawUrl;
+  }
+}
+
 class TileManager {
   constructor(scene, camera, renderer) {
     this.scene = scene;
@@ -43,10 +92,13 @@ class TileManager {
     this._tickPending = false;
     this.manifestVersion = 0;
     this._queueSeq = 0;
+    this.manifestUrl = null;
+    this.tileBaseUrl = null;
   }
 
   async init(manifestUrl) {
     const version = ++this.manifestVersion;
+    this.manifestUrl = manifestUrl;
     this.rootTileIds.clear();
     try {
       const manifest = await (await fetch(manifestUrl)).json();
@@ -54,6 +106,7 @@ class TileManager {
         return;
       }
       this.manifest = manifest;
+      this.tileBaseUrl = deduceTileBaseUrl(manifestUrl, manifest);
       this._computeLevelGeStats();
       for (const t of this.manifest.tiles) {
         this.byId.set(t.tileId, t);
@@ -379,19 +432,22 @@ class TileManager {
     const meta = this.byId.get(id);
     if (!meta) return null;
 
+    const tileUrl = resolveTileUrl(meta.url, this.tileBaseUrl);
+    if (!tileUrl) return null;
+
     const versionAtStart = this.manifestVersion;
     this.inflight++;
     let rec = null;
     try {
       let glb;
-      const prefetched = prefetchedTileBuffers.get(meta.url);
+      const prefetched = prefetchedTileBuffers.get(tileUrl);
       if (prefetched) {
-        prefetchedTileBuffers.delete(meta.url);
+        prefetchedTileBuffers.delete(tileUrl);
         glb = await new Promise((resolve, reject) => {
           this.loader.parse(prefetched.slice(0), '', resolve, reject);
         });
       } else {
-        glb = await this.loader.loadAsync(meta.url);
+        glb = await this.loader.loadAsync(tileUrl);
       }
       if (versionAtStart !== this.manifestVersion) {
         glb.scene.traverse(o => {
@@ -724,17 +780,20 @@ async function prefetchRootTiles(extract, time) {
   if (prefetchInFlight.has(key)) return;
   prefetchInFlight.add(key);
   try {
-    const resp = await fetch(`/manifest/${extract}/${time}.json`);
+    const manifestUrl = `/manifest/${extract}/${time}.json`;
+    const resp = await fetch(manifestUrl);
     if (!resp.ok) return;
     const manifest = await resp.json();
+    const tileBaseUrl = deduceTileBaseUrl(manifestUrl, manifest);
     const roots = (manifest.tiles || []).filter(t => t.z === 0);
     await Promise.all(roots.map(async (tile) => {
-      if (!tile.url || prefetchedTileBuffers.has(tile.url)) return;
+      const resolvedUrl = resolveTileUrl(tile.url, tileBaseUrl);
+      if (!resolvedUrl || prefetchedTileBuffers.has(resolvedUrl)) return;
       try {
-        const res = await fetch(tile.url);
+        const res = await fetch(resolvedUrl);
         if (!res.ok) return;
         const buffer = await res.arrayBuffer();
-        prefetchedTileBuffers.set(tile.url, buffer);
+        prefetchedTileBuffers.set(resolvedUrl, buffer);
       } catch (err) {
         console.warn('Prefetch tile failed', tile.url, err);
       }

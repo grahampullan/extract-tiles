@@ -630,6 +630,17 @@ def _tile_uri_relative(manifest_dir: Path, url: Optional[str]) -> Optional[str]:
     return "/".join(parts)
 
 
+def _manifest_tile_url(out_path: str, extract_root: Path) -> str:
+    """Return a manifest-friendly relative URL for a tile binary."""
+    tile_path = Path(out_path)
+    base = Path(extract_root)
+    try:
+        rel = tile_path.relative_to(base)
+    except ValueError:
+        rel = Path(os.path.relpath(tile_path, base))
+    return rel.as_posix()
+
+
 def mat4_to_column_major(mat: List[List[float]]) -> List[float]:
     """Flatten a 4x4 row-major matrix into column-major order."""
     if len(mat) != 4 or any(len(row) != 4 for row in mat):
@@ -1123,6 +1134,8 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
         "tiles": []
     }
 
+    extract_root = Path(out_dir) / extract
+
     all_tiles = []
     depth_size_samples = []
     depth_decimation_samples = []
@@ -1228,8 +1241,8 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                     write_glb_from_trimesh(m, meta, out_path)
                     actual_bytes = os.path.getsize(out_path)
                     depth_size_samples.append((z, actual_bytes))
-                    mesh_tiles[tid] = {**meta, "actualBytes": int(actual_bytes),
-                                       "url": f"/tiles/{extract}/{time_index}/mesh_{mesh_idx}/{z}/{x}/{y}.glb"}
+                    tile_url = _manifest_tile_url(out_path, extract_root)
+                    mesh_tiles[tid] = {**meta, "actualBytes": int(actual_bytes), "url": tile_url}
 
         all_tiles.extend(mesh_tiles.values())
 
@@ -1349,6 +1362,8 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
         "tiles": []
     }
 
+    extract_root = Path(out_dir) / extract
+
     tiles_meta = {}
     depth_size_samples = []
     depth_decimation_samples = []
@@ -1442,8 +1457,8 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                     write_glb_from_trimesh(m, meta, out_path)
                     actual_bytes = os.path.getsize(out_path)
                     depth_size_samples.append((z, actual_bytes))
-                    tiles_meta[tid] = {**meta, "actualBytes": int(actual_bytes),
-                                       "url": f"/tiles/{extract}/{time_index}/{z}/{i}/{j}/{k}.glb"}
+                    tile_url = _manifest_tile_url(out_path, extract_root)
+                    tiles_meta[tid] = {**meta, "actualBytes": int(actual_bytes), "url": tile_url}
 
     def keyz(tid):
         return tuple(map(int, tid.split('/')))

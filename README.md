@@ -96,6 +96,31 @@ python3 build_tiles.py \
 
 During import, any PBR base-colour textures are baked into per-vertex `COLOR_0` attributes so that world-space tiles can render with colour without shipping textures.
 
+#### Quick-start example
+
+If you simply want to reproduce the single-cylinder dataset we ship in `examples/`, the exact command we use during development is:
+
+```bash
+python3 build_tiles.py \
+  --in_glb examples/single_cylinder/single_cylinder.glb \
+  --tiling_space uv \
+  --out_dir tiles_out \
+  --extract single-cylinder-uv \
+  --max_depth 4 \
+  --target_kb 100 \
+  --preserve_borders \
+  --snap_ratio 0.001 \
+  --skip_leaf_decimation \
+  --min_ratio 0.002 \
+  --min_tris 8 \
+  --max_iter 6 \
+  --root_voxel_ratio 0.02 \
+  --root_voxel_trigger 4 \
+  --write_tileset
+```
+
+Those switches keep the deepest tiles at full fidelity, aggressively snap borders, and emit both the manifest and a 3D Tiles tileset. Drop the flags you don’t need or tweak the depth/target size to suit your dataset.
+
 #### Example: UV tiles ready for the CesiumJS viewer
 
 To reproduce the oblique-cylinder dataset (with border preservation, tuned decimation knobs, and a tileset placed over Cambridge, UK) run:
