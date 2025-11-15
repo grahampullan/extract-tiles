@@ -1406,6 +1406,7 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
             for j in range(div):
                 for k in range(div):
                     raw_aabb = child_bounds(scene_aabb, z, i, j, k)
+                    diag_raw = float(np.linalg.norm(np.asarray(raw_aabb[1]) - np.asarray(raw_aabb[0])))
                     aabb_loose = expand_aabb(raw_aabb, world_eps_ratio)
                     mask = in_aabb(cent, aabb_loose)
 
