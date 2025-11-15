@@ -163,6 +163,23 @@ def _append_buffer_bytes(gltf: GLTF2, buffers: List[bytes], data: bytes) -> int:
     gltf.buffers.append(Buffer(byteLength=len(data)))
     return buffer_index
 
+def _material_base_color_rgba(gltf: GLTF2, material_index: Optional[int]) -> np.ndarray:
+    """Return material baseColorFactor as RGBA (defaults to white)."""
+    default = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+    if material_index is None:
+        return default
+    materials = getattr(gltf, "materials", None) or []
+    if material_index < 0 or material_index >= len(materials):
+        return default
+    material = materials[material_index]
+    pbr = getattr(material, "pbrMetallicRoughness", None)
+    if pbr and isinstance(pbr.baseColorFactor, list) and len(pbr.baseColorFactor) == 4:
+        return np.array(pbr.baseColorFactor, dtype=np.float32)
+    emissive = getattr(material, "emissiveFactor", None)
+    if isinstance(emissive, list) and len(emissive) == 3:
+        return np.array([float(emissive[0]), float(emissive[1]), float(emissive[2]), 1.0], dtype=np.float32)
+    return default
+
 
 def bake_textures_to_vertex_colors(gltf: GLTF2, buffers: List[bytes]):
     if not isinstance(gltf.extras, dict):
@@ -1305,6 +1322,12 @@ def in_aabb(points, aabb):
     mn, mx = aabb
     return np.all((points>=mn-1e-9) & (points<=mx+1e-9), axis=1)
 
+def in_aabb_half_open(points, aabb):
+    """Half-open AABB test that avoids dual membership"""
+    mn, mx = aabb
+    return np.all((points >= mn - 1e-9) & (points < mx - 1e-12), axis=1)
+
+
 def subset_trimesh_by_mask(pos, idx, mask, uv=None, col=None):
     """Create subset mesh from triangle mask (world-space version)"""
     tri_idx = idx.reshape(-1,3)[mask]
@@ -1333,12 +1356,14 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                        max_depth=MAX_DEPTH, target_bytes=TARGET_TILE_BYTES,
                        preserve_borders=False, snap_radius=None, snap_ratio=None,
                        skip_leaf_decimation=False,
+                       world_eps_ratio=WORLD_EPS_RATIO,
                        min_ratio=0.02, min_tris=32, max_iter=6,
                        root_voxel_ratio=None, root_voxel_trigger=4.0,
                        write_tileset=False,
                        tileset_transform=None,
                        tileset_transform_info=None):
     """Build world-space octree tiles"""
+    print(f"[world] using world_eps_ratio={world_eps_ratio}")
     pos, uv, col, idx = load_glb_arrays(src_glb)
 
     triA = tri_areas(pos, idx)
@@ -1367,20 +1392,18 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
     tiles_meta = {}
     depth_size_samples = []
     depth_decimation_samples = []
-
     for z in range(0, max_depth+1):
         div = 1<<z
         for i in range(div):
             for j in range(div):
                 for k in range(div):
-                    aabb = child_bounds(scene_aabb, z, i, j, k)
-                    aabb_loose = expand_aabb(aabb, WORLD_EPS_RATIO)
+                    raw_aabb = child_bounds(scene_aabb, z, i, j, k)
+                    aabb_loose = expand_aabb(raw_aabb, world_eps_ratio)
                     mask = in_aabb(cent, aabb_loose)
 
                     m = subset_trimesh_by_mask(pos, idx, mask, uv=None, col=col)
                     if m is None:
                         continue
-
                     orig_triangles = len(m.faces)
                     if orig_triangles == 0:
                         continue
@@ -1598,6 +1621,8 @@ def main():
                        help='Absolute snap radius (world units) when --preserve_borders is enabled')
     parser.add_argument('--snap_ratio', type=float, default=1e-3,
                        help='Relative snap tolerance as a fraction of tile diagonal (set 0 to disable)')
+    parser.add_argument('--world_eps_ratio', type=float, default=WORLD_EPS_RATIO,
+                       help='Overlap margin ratio for world-space octree bounds (default 0.01)')
 
     parser.add_argument('--snapshots', action='store_true',
                         help='Process all GLB files in --input_dir as sequential time steps')
@@ -1621,6 +1646,7 @@ def main():
                        help='Uniform scale factor applied at the tileset root when --write_tileset is used (default 1.0)')
 
     args = parser.parse_args()
+    world_eps_ratio = args.world_eps_ratio if args.world_eps_ratio is not None else WORLD_EPS_RATIO
 
     if args.snapshots:
         if args.input_dir is None:
@@ -1709,6 +1735,7 @@ def main():
                 snap_radius=snap_radius,
                 snap_ratio=snap_ratio,
                 skip_leaf_decimation=args.skip_leaf_decimation,
+                world_eps_ratio=world_eps_ratio,
                 min_ratio=args.min_ratio,
                 min_tris=args.min_tris,
                 max_iter=args.max_iter,

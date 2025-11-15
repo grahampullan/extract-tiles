@@ -4,4 +4,5 @@
 # Large generated assets
 /examples/**/*.glb
 /examples/**/*.gltf
+/examples/**/*.bin
 examples/dns*/
