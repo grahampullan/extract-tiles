@@ -83,6 +83,7 @@ python3 build_tiles.py \
 - `--preserve_borders`: Snap simplified tile boundaries back to their original vertex positions and skip skirt geometry (helps on closed seams)
 - `--snap_radius`: Absolute world-space snapping tolerance (used with `--preserve_borders`)
 - `--snap_ratio`: Relative snapping tolerance expressed as a fraction of the tile’s bounding-box diagonal (default 1e-3, set to 0 to disable when using `--snap_radius` instead)
+- `--border_projection`: When used with `--preserve_borders` (world tiler), project boundary vertices to the analytic cell planes instead of snapping to nearest original seam points.
 - `--input_dir` + `--snapshots`: Treat every `.glb` in a directory as a successive time step (use with `--time` to set the starting index)
 - `--skip_leaf_decimation`: Keep tiles at the deepest level at full resolution while still simplifying parent levels
 - `--min_ratio`: Minimum fraction of faces retained per decimation pass (default 0.02 = 2%)

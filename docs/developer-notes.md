@@ -19,7 +19,7 @@ This document explains how the tiler and viewer work under the hood. It dives in
 | `tri_areas`, `tri_centroids_world`, `uv_centroids` | Vectorised helpers to compute per-triangle areas and centroids (drives UV/world partitioning). |
 | `decimate_to_target(trimesh, target_bytes)` | Converts a `trimesh.Trimesh` into Open3D, runs quadric decimation until estimated size ≤ target × tolerance, and re-projects UV/colour attributes. |
 | `add_skirts(tri_mesh, skirt_h_ratio)` | Optional seam guard: duplicates boundary vertices, extrudes along normals, and rebuilds UV/colour arrays. |
-| `snap_decimated_border(decimated, original_border_pts, snap_radius)` | After decimation, snaps border vertices back onto pre-captured positions (used with `--preserve_borders`). |
+| `snap_decimated_border` / `project_vertices_to_cell_planes` | Seam repair routines used when `--preserve_borders` is enabled. The former snaps to nearest original seam points, the latter (world mode) projects vertices to analytic cell planes when `--border_projection` is set. |
 | `write_glb_from_trimesh(tri_mesh, meta, out_path)` | Minimal glTF writer using pygltflib. Creates buffer views/accessors for POSITION, TEXCOORD_0, COLOR_0, indices, and attaches `meta` as mesh extras. |
 
 ### 1.3. `build_uv_quadtree`

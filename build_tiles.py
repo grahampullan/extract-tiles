@@ -1088,6 +1088,7 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                       split_meshes=False, preserve_borders=False,
                       snap_radius=None, snap_ratio=None,
                       skip_leaf_decimation=False,
+                      border_projection=False,
                       min_ratio=0.02, min_tris=32, max_iter=6,
                       root_voxel_ratio=None, root_voxel_trigger=4.0,
                       write_tileset=False,
@@ -1189,17 +1190,17 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                     snap_tol = None
                     preserve_this_tile = preserve_borders and z > 0
                     if preserve_this_tile:
-                        border_edges = compute_border_edges(m)
-                        if border_edges:
-                            unique_idx = np.unique(np.asarray(border_edges).flatten())
-                            orig_border_pts = np.asarray(m.vertices)[unique_idx]
-                            diag = float(np.linalg.norm(m.bounds[1] - m.bounds[0]))
-                            if snap_radius is not None:
-                                snap_tol = snap_radius
-                            elif snap_ratio is not None and diag > 0:
-                                snap_tol = snap_ratio * diag
-                            elif snap_ratio is not None:
-                                snap_tol = snap_ratio
+                        diag = float(np.linalg.norm(m.bounds[1] - m.bounds[0]))
+                        base_length = diag if diag > 0 else 1.0
+                        if snap_radius is not None:
+                            snap_tol = snap_radius
+                        elif snap_ratio is not None:
+                            snap_tol = snap_ratio * base_length
+                        if not border_projection:
+                            border_edges = compute_border_edges(m)
+                            if border_edges:
+                                unique_idx = np.unique(np.asarray(border_edges).flatten())
+                                orig_border_pts = np.asarray(m.vertices)[unique_idx]
 
                     if not (skip_leaf_decimation and z == max_depth):
                         m = decimate_to_target(m, target_bytes, min_ratio=min_ratio, min_tris=min_tris, max_iter=max_iter)
@@ -1225,8 +1226,14 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                     if orig_triangles > 0:
                         depth_decimation_samples.append((z, decimated_triangles / orig_triangles))
 
-                    if preserve_this_tile and orig_border_pts is not None and snap_tol is not None:
-                        snap_decimated_border(m, orig_border_pts, snap_radius=snap_tol)
+                    if preserve_this_tile:
+                        if border_projection:
+                            uv_bounds = uv_tile_bounds(z, x, y)
+                            tile_diag_uv = math.sqrt(2) / (1 << z)
+                            tol_uv = snap_tol if snap_tol is not None else max(1e-6, 1e-3 * tile_diag_uv)
+                            project_vertices_to_uv_border(m, uv_bounds, tol=tol_uv)
+                        elif orig_border_pts is not None and snap_tol is not None:
+                            snap_decimated_border(m, orig_border_pts, snap_radius=snap_tol)
 
                     aabb_min = m.bounds[0].tolist()
                     aabb_max = m.bounds[1].tolist()
@@ -1361,7 +1368,8 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                        root_voxel_ratio=None, root_voxel_trigger=4.0,
                        write_tileset=False,
                        tileset_transform=None,
-                       tileset_transform_info=None):
+                       tileset_transform_info=None,
+                       border_projection=False):
     """Build world-space octree tiles"""
     print(f"[world] using world_eps_ratio={world_eps_ratio}")
     pos, uv, col, idx = load_glb_arrays(src_glb)
@@ -1411,18 +1419,18 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                     orig_border_pts = None
                     snap_tol = None
                     preserve_this_tile = preserve_borders and z > 0
+                    tile_diag_uv = math.sqrt(2) / (1 << z)
                     if preserve_this_tile:
-                        border_edges = compute_border_edges(m)
-                        if border_edges:
-                            unique_idx = np.unique(np.asarray(border_edges).flatten())
-                            orig_border_pts = np.asarray(m.vertices)[unique_idx]
-                            diag = float(np.linalg.norm(m.bounds[1] - m.bounds[0]))
-                            if snap_radius is not None:
-                                snap_tol = snap_radius
-                            elif snap_ratio is not None and diag > 0:
-                                snap_tol = snap_ratio * diag
-                            elif snap_ratio is not None:
-                                snap_tol = snap_ratio
+                        base_length = float(np.linalg.norm(m.bounds[1] - m.bounds[0])) or 1.0
+                        if snap_radius is not None:
+                            snap_tol = snap_radius
+                        elif snap_ratio is not None:
+                            snap_tol = snap_ratio * base_length
+                        if not border_projection:
+                            border_edges = compute_border_edges(m)
+                            if border_edges:
+                                unique_idx = np.unique(np.asarray(border_edges).flatten())
+                                orig_border_pts = np.asarray(m.vertices)[unique_idx]
 
                     if not (skip_leaf_decimation and z == max_depth):
                         m = decimate_to_target(m, target_bytes, min_ratio=min_ratio, min_tris=min_tris, max_iter=max_iter)
@@ -1446,8 +1454,12 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                     if orig_triangles > 0:
                         depth_decimation_samples.append((z, decimated_triangles / orig_triangles))
 
-                    if preserve_this_tile and orig_border_pts is not None and snap_tol is not None:
-                        snap_decimated_border(m, orig_border_pts, snap_radius=snap_tol)
+                    if preserve_this_tile:
+                        if border_projection:
+                            effective_tol = snap_tol if snap_tol is not None else max(1e-6, 1e-3 * diag_raw)
+                            project_vertices_to_cell_planes(m, raw_aabb, tol=effective_tol)
+                        elif orig_border_pts is not None and snap_tol is not None:
+                            snap_decimated_border(m, orig_border_pts, snap_radius=snap_tol)
 
                     aabb_min = m.bounds[0].tolist()
                     aabb_max = m.bounds[1].tolist()
@@ -1597,6 +1609,90 @@ def snap_decimated_border(decimated: tm.Trimesh, original_border_pts: np.ndarray
     decimated.vertices = V
     return decimated
 
+def project_vertices_to_cell_planes(mesh: tm.Trimesh, cell_aabb, tol: float):
+    """Project vertices near analytic cell planes onto those planes."""
+    if mesh is None or tol is None or tol <= 0:
+        return
+    V = np.asarray(mesh.vertices)
+    if V.size == 0:
+        return
+    mn = np.asarray(cell_aabb[0], dtype=np.float64)
+    mx = np.asarray(cell_aabb[1], dtype=np.float64)
+    for axis in range(3):
+        min_plane = mn[axis]
+        max_plane = mx[axis]
+        mask = np.abs(V[:, axis] - min_plane) <= tol
+        V[mask, axis] = min_plane
+        mask = np.abs(V[:, axis] - max_plane) <= tol
+        V[mask, axis] = max_plane
+    mesh.vertices = V
+
+def barycentric_coords_2d(tri_uv, point, eps=1e-9):
+    (u0, v0), (u1, v1), (u2, v2) = tri_uv
+    u, v = point
+    denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2)
+    if abs(denom) < eps:
+        return None
+    a = ((v1 - v2) * (u - u2) + (u2 - u1) * (v - v2)) / denom
+    b = ((v2 - v0) * (u - u2) + (u0 - u2) * (v - v2)) / denom
+    c = 1.0 - a - b
+    return np.array([a, b, c], dtype=np.float64)
+
+def project_vertices_to_uv_border(mesh: tm.Trimesh, uv_bounds, tol: float):
+    """Project UV-space border vertices onto analytic UV tile bounds and recompute XYZ via barycentric weights."""
+    if mesh is None or tol is None or tol <= 0:
+        return
+    uv_attr = getattr(mesh.visual, "uv", None)
+    if uv_attr is None:
+        return
+    uv = np.asarray(uv_attr, dtype=np.float64)
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    if uv.size == 0 or verts.size == 0 or faces.size == 0:
+        return
+
+    orig_uv = uv.copy()
+    orig_pos = verts.copy()
+    adjacency = [[] for _ in range(len(uv))]
+    for face_idx, tri in enumerate(faces):
+        for vid in tri:
+            adjacency[vid].append(face_idx)
+
+    u0, v0, u1, v1 = uv_bounds
+    for vid, (u, v) in enumerate(uv):
+        new_u, new_v = u, v
+        if abs(u - u0) <= tol:
+            new_u = u0
+        elif abs(u - u1) <= tol:
+            new_u = u1
+        if abs(v - v0) <= tol:
+            new_v = v0
+        elif abs(v - v1) <= tol:
+            new_v = v1
+
+        if new_u == u and new_v == v:
+            continue
+
+        uv[vid] = (new_u, new_v)
+
+        new_pos = None
+        for face_idx in adjacency[vid]:
+            tri = faces[face_idx]
+            tri_uv = orig_uv[tri]
+            bary = barycentric_coords_2d(tri_uv, (new_u, new_v))
+            if bary is None:
+                continue
+            if np.any(bary < -1e-4):
+                continue
+            tri_pos = orig_pos[tri]
+            new_pos = np.sum(bary[:, None] * tri_pos, axis=0)
+            break
+        if new_pos is not None:
+            verts[vid] = new_pos
+
+    mesh.visual.uv = uv.astype(np.float32)
+    mesh.vertices = verts.astype(np.float32)
+
 # ============================================================================
 # Main CLI
 # ============================================================================
@@ -1617,6 +1713,8 @@ def main():
                        help='UV mode only: build a separate quadtree for each mesh primitive')
     parser.add_argument('--preserve_borders', action='store_true',
                        help='Snap decimated tile borders back to original positions and disable skirts')
+    parser.add_argument('--border_projection', action='store_true',
+                       help='When preserving borders, project vertices to analytic cell planes instead of snapping to nearest originals')
     parser.add_argument('--snap_radius', type=float, default=None,
                        help='Absolute snap radius (world units) when --preserve_borders is enabled')
     parser.add_argument('--snap_ratio', type=float, default=1e-3,
@@ -1716,6 +1814,7 @@ def main():
                 snap_radius=snap_radius,
                 snap_ratio=snap_ratio,
                 skip_leaf_decimation=args.skip_leaf_decimation,
+                border_projection=args.border_projection,
                 min_ratio=args.min_ratio,
                 min_tris=args.min_tris,
                 max_iter=args.max_iter,
@@ -1744,6 +1843,7 @@ def main():
                 write_tileset=args.write_tileset,
                 tileset_transform=tileset_transform,
                 tileset_transform_info=tileset_transform_info,
+                border_projection=args.border_projection,
             )
 
     if args.snapshots:
