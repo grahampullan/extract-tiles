@@ -1047,11 +1047,11 @@ def uv_tile_bounds(z,x,y):
     v0 = y*s
     return u0, v0, u0+s, v0+s
 
-def uv_in_tile(centroids, b):
+def uv_in_tile(centroids, b, eps=UV_EPS):
     """Check which triangles are in a UV tile (with overlap)"""
     u0, v0, u1, v1 = b
-    return (centroids[:,0]>=u0-UV_EPS) & (centroids[:,0]<=u1+UV_EPS) & \
-           (centroids[:,1]>=v0-UV_EPS) & (centroids[:,1]<=v1+UV_EPS)
+    return (centroids[:,0]>=u0-eps) & (centroids[:,0]<=u1+eps) & \
+           (centroids[:,1]>=v0-eps) & (centroids[:,1]<=v1+eps)
 
 def subset_trimesh(pos, uv, col, idx, tri_mask):
     """Create subset mesh from triangle mask"""
@@ -1093,7 +1093,8 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                       root_voxel_ratio=None, root_voxel_trigger=4.0,
                       write_tileset=False,
                       tileset_transform=None,
-                      tileset_transform_info=None):
+                      tileset_transform_info=None,
+                      uv_eps=UV_EPS):
     """Build UV-based quadtree tiles"""
     mesh_entries = []
     if split_meshes:
@@ -1176,7 +1177,7 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
             for x in range(1<<z):
                 for y in range(1<<z):
                     b = uv_tile_bounds(z,x,y)
-                    mask = uv_in_tile(triC, b)
+                    mask = uv_in_tile(triC, b, eps=uv_eps)
                     m = subset_trimesh(pos, uv, col, idx, mask)
 
                     if m is None:
@@ -1737,6 +1738,8 @@ def main():
                         help='If set, fallback voxel clustering ratio (fraction of bounding box diagonal) for root tiles when decimation cannot reach target size')
     parser.add_argument('--root_voxel_trigger', type=float, default=4.0,
                         help='Multiplier of target bytes that triggers root voxel clustering (default 4x target)')
+    parser.add_argument('--uv_eps', type=float, default=UV_EPS,
+                       help='Overlap margin (in UV units) when assigning triangles to UV tiles (default 0.005)')
     parser.add_argument('--write_tileset', action='store_true',
                        help='Emit a Cesium 3D Tiles 1.1 tileset.json referencing the generated GLB tiles')
     parser.add_argument('--tileset-origin', type=str, default=None,
@@ -1824,6 +1827,7 @@ def main():
                 write_tileset=args.write_tileset,
                 tileset_transform=tileset_transform,
                 tileset_transform_info=tileset_transform_info,
+                uv_eps=args.uv_eps,
             )
         else:
             if args.split_meshes:
