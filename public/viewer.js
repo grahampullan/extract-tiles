@@ -94,6 +94,9 @@ class TileManager {
     this._queueSeq = 0;
     this.manifestUrl = null;
     this.tileBaseUrl = null;
+    this.wireOverlayEnabled = false;
+    this.wireOverlayAngle = 0;
+    this.wireOverlayOpacity = 1.0;
   }
 
   async init(manifestUrl) {
@@ -182,6 +185,105 @@ class TileManager {
   _children(meta) {
     return (meta.children || []).map(id => this.byId.get(id)).filter(Boolean);
   }
+
+  _disposeWireOverlay(mesh) {
+    if (mesh.userData?.wireOverlay) {
+      const overlay = mesh.userData.wireOverlay;
+      mesh.remove(overlay);
+      overlay.geometry?.dispose();
+      overlay.material?.dispose?.();
+      mesh.userData.wireOverlay = null;
+    }
+  }
+
+  _createWireOverlay(mesh) {
+    if (!mesh.isMesh || !mesh.geometry) return;
+    if (mesh.userData?.wireOverlay) return;
+    try {
+      const edgesGeo = new THREE.EdgesGeometry(mesh.geometry, 0);
+      const edgesMat = new THREE.LineBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: this.wireOverlayOpacity ?? 0.9,
+        depthTest: true,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1
+      });
+      const edges = new THREE.LineSegments(edgesGeo, edgesMat);
+      edges.renderOrder = 1;
+      mesh.add(edges);
+      mesh.userData.wireOverlay = edges;
+    } catch (err) {
+      console.warn("Failed to create wire overlay", err);
+    }
+  }
+
+  _setWireOverlayVisible(obj, visible) {
+    if (!obj) return;
+    obj.traverse(o => {
+      if (!o.isMesh) return;
+      if (visible) {
+        if (!o.userData?.wireOverlay) {
+          this._createWireOverlay(o);
+        }
+        if (o.userData?.wireOverlay) {
+          o.userData.wireOverlay.visible = true;
+          o.userData.wireOverlay.material.opacity = 1.0;
+        }
+      } else if (o.userData?.wireOverlay) {
+        o.userData.wireOverlay.visible = false;
+      }
+    });
+  }
+
+  applyWireOverlayState(value) {
+    this.wireOverlayEnabled = value;
+    for (const [, rec] of this.tiles) {
+      this._setWireOverlayVisible(rec.obj3d, value);
+      if (!this.tileColorMode && !this.simpleShadingMode) {
+        if (value) {
+          this._applyOverlayBaseShading(rec);
+        } else {
+          this._restoreTileMaterial(rec);
+        }
+      }
+    }
+    for (const [id, rec] of this.cache) {
+      if (this.tiles.has(id)) continue;
+      this._setWireOverlayVisible(rec.obj3d, value);
+      if (!this.tileColorMode && !this.simpleShadingMode) {
+        if (value) {
+          this._applyOverlayBaseShading(rec);
+        } else {
+          this._restoreTileMaterial(rec);
+        }
+      }
+    }
+  }
+
+  rebuildWireOverlayGeometry() {
+    const clear = (obj) => {
+      if (!obj) return;
+      obj.traverse(o => {
+        if (o.isMesh) {
+          this._disposeWireOverlay(o);
+        }
+      });
+    };
+    for (const [, rec] of this.tiles) {
+      clear(rec.obj3d);
+    }
+    for (const [id, rec] of this.cache) {
+      if (this.tiles.has(id)) continue;
+      clear(rec.obj3d);
+    }
+    if (this.wireOverlayEnabled) {
+      this.applyWireOverlayState(true);
+    }
+  }
+
 
   _decide() {
     const replaceParents = new Set();
@@ -385,9 +487,12 @@ class TileManager {
         this._applyTileColor(rec);
       } else if (this.simpleShadingMode) {
         this._applySimpleShading(rec);
+      } else if (this.wireOverlayEnabled) {
+        this._applyOverlayBaseShading(rec);
       } else {
         this._restoreTileMaterial(rec);
       }
+      this._setWireOverlayVisible(rec.obj3d, this.wireOverlayEnabled);
       return;
     }
 
@@ -521,7 +626,12 @@ class TileManager {
         this._applyTileColor(rec);
       } else if (this.simpleShadingMode) {
         this._applySimpleShading(rec);
+      } else if (this.wireOverlayEnabled) {
+        this._applyOverlayBaseShading(rec);
+      } else {
+        this._restoreTileMaterial(rec);
       }
+      this._setWireOverlayVisible(obj, this.wireOverlayEnabled);
     } catch (e) {
       console.error("Tile load failed", id, e);
     } finally {
@@ -660,6 +770,23 @@ class TileManager {
           info.generatedNormals = false;
         }
         obj.material = info.simpleMaterial;
+      }
+    });
+  }
+
+  _applyOverlayBaseShading(rec) {
+    rec.obj3d.traverse(obj => {
+      if (obj.isMesh && obj.userData && obj.userData.debugInfo) {
+        const info = obj.userData.debugInfo;
+        if (!info.overlayMaterial) {
+          info.overlayMaterial = new THREE.MeshBasicMaterial({
+            color: new THREE.Color(0.1, 0.1, 0.1),
+            vertexColors: false,
+            side: THREE.DoubleSide,
+            fog: false
+          });
+        }
+        obj.material = info.overlayMaterial;
       }
     });
   }
@@ -825,11 +952,12 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setClearColor(0xe0e0e0, 1);
   document.getElementById('app').appendChild(renderer.domElement);
 
   // Setup scene
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x000000); 
+  scene.background = new THREE.Color(0xe0e0e0); 
 
   // Setup camera
   const camera = new THREE.PerspectiveCamera(
@@ -860,11 +988,15 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     wireframe: false,
     boundingBoxes: true,
     tileColorMode: false,
-    simpleShading: true
+    simpleShading: true,
+    wireframeOverlay: false,
+    wireframeOverlayOpacity: 1.0
   };
 
   mgr.showBoundingBoxes = settings.boundingBoxes;
   mgr.simpleShadingMode = settings.simpleShading;
+  mgr.wireOverlayOpacity = settings.wireframeOverlayOpacity;
+  mgr.applyWireOverlayState(settings.wireframeOverlay);
 
   const gui = new GUI({ width: 300 });
   const datasetFolder = gui.addFolder('Dataset');
@@ -921,6 +1053,8 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
       for (const [, rec] of mgr.tiles) {
         if (mgr.simpleShadingMode) {
           mgr._applySimpleShading(rec);
+        } else if (mgr.wireOverlayEnabled) {
+          mgr._applyOverlayBaseShading(rec);
         } else {
           mgr._restoreTileMaterial(rec);
         }
@@ -929,6 +1063,8 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
         if (mgr.tiles.has(id)) continue;
         if (mgr.simpleShadingMode) {
           mgr._applySimpleShading(rec);
+        } else if (mgr.wireOverlayEnabled) {
+          mgr._applyOverlayBaseShading(rec);
         } else {
           mgr._restoreTileMaterial(rec);
         }
@@ -952,6 +1088,8 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
       for (const [, rec] of mgr.tiles) {
         if (mgr.tileColorMode) {
           mgr._applyTileColor(rec);
+        } else if (mgr.wireOverlayEnabled) {
+          mgr._applyOverlayBaseShading(rec);
         } else {
           mgr._restoreTileMaterial(rec);
         }
@@ -960,6 +1098,8 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
         if (mgr.tiles.has(id)) continue;
         if (mgr.tileColorMode) {
           mgr._applyTileColor(rec);
+        } else if (mgr.wireOverlayEnabled) {
+          mgr._applyOverlayBaseShading(rec);
         } else {
           mgr._restoreTileMaterial(rec);
         }
@@ -1145,7 +1285,7 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     }
   }
 
-  sseRefineController = lodFolder.add(settings, 'sseRefine', 0.1, 120, 0.1).name('SSE Refine').onChange((value) => {
+  sseRefineController = lodFolder.add(settings, 'sseRefine', 0.1, 200, 0.1).name('SSE Refine').onChange((value) => {
     if (suppressSseHandler) {
       settings.sseRefine = value;
       return;
@@ -1204,6 +1344,13 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
 
     applySimpleShadingState(value);
   });
+
+  diagnosticsFolder.add(settings, 'wireframeOverlay').name('Wireframe overlay').onChange((value) => {
+    settings.wireframeOverlay = value;
+    mgr.applyWireOverlayState(value);
+    mgr.tick();
+  });
+
 
   diagnosticsFolder.open();
   lodFolder.open();
