@@ -83,7 +83,7 @@ python3 build_tiles.py \
 - `--preserve_borders`: Snap simplified tile boundaries back to their original vertex positions and skip skirt geometry (helps on closed seams)
 - `--snap_radius`: Absolute world-space snapping tolerance (used with `--preserve_borders`)
 - `--snap_ratio`: Relative snapping tolerance expressed as a fraction of the tile’s bounding-box diagonal (default 1e-3, set to 0 to disable when using `--snap_radius` instead)
-- `--uv_eps`: Override the UV overlap margin when assigning triangles to quadtree tiles (default 0.005 UV units)
+- `--uv_eps_ratio`: Override the *relative* UV overlap margin per tile (default 0.01 = 1% of each tile’s span)
 - `--border_projection`: When used with `--preserve_borders` (world tiler), project boundary vertices to the analytic cell planes instead of snapping to nearest original seam points.
 - `--input_dir` + `--snapshots`: Treat every `.glb` in a directory as a successive time step (use with `--time` to set the starting index)
 - `--skip_leaf_decimation`: Keep tiles at the deepest level at full resolution while still simplifying parent levels

@@ -25,7 +25,7 @@ from pygltflib import (
 # Configuration constants
 TARGET_TILE_BYTES = 200_000     # ~200 KB per tile
 SIZE_TOLERANCE    = 0.15        # ±15%
-UV_EPS            = 0.005       # UV overlap margin (~0.5%)
+UV_EPS_RATIO      = 0.01        # UV overlap margin ratio (~1%)
 WORLD_EPS_RATIO   = 0.01        # world overlap margin (~1% of node size)
 MAX_DEPTH         = 5
 
@@ -1047,7 +1047,7 @@ def uv_tile_bounds(z,x,y):
     v0 = y*s
     return u0, v0, u0+s, v0+s
 
-def uv_in_tile(centroids, b, eps=UV_EPS):
+def uv_in_tile(centroids, b, eps=UV_EPS_RATIO):
     """Check which triangles are in a UV tile (with overlap)"""
     u0, v0, u1, v1 = b
     return (centroids[:,0]>=u0-eps) & (centroids[:,0]<=u1+eps) & \
@@ -1094,7 +1094,7 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
                       write_tileset=False,
                       tileset_transform=None,
                       tileset_transform_info=None,
-                      uv_eps=UV_EPS):
+                      uv_eps_ratio=UV_EPS_RATIO):
     """Build UV-based quadtree tiles"""
     mesh_entries = []
     if split_meshes:
@@ -1177,7 +1177,9 @@ def build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0,
             for x in range(1<<z):
                 for y in range(1<<z):
                     b = uv_tile_bounds(z,x,y)
-                    mask = uv_in_tile(triC, b, eps=uv_eps)
+                    tile_size = 1.0 / (1 << z)
+                    eps = uv_eps_ratio * tile_size
+                    mask = uv_in_tile(triC, b, eps=eps)
                     m = subset_trimesh(pos, uv, col, idx, mask)
 
                     if m is None:
@@ -1738,8 +1740,8 @@ def main():
                         help='If set, fallback voxel clustering ratio (fraction of bounding box diagonal) for root tiles when decimation cannot reach target size')
     parser.add_argument('--root_voxel_trigger', type=float, default=4.0,
                         help='Multiplier of target bytes that triggers root voxel clustering (default 4x target)')
-    parser.add_argument('--uv_eps', type=float, default=UV_EPS,
-                       help='Overlap margin (in UV units) when assigning triangles to UV tiles (default 0.005)')
+    parser.add_argument('--uv_eps_ratio', type=float, default=UV_EPS_RATIO,
+                       help='Relative UV overlap margin per tile (default 0.01 = 1% of tile extent)')
     parser.add_argument('--write_tileset', action='store_true',
                        help='Emit a Cesium 3D Tiles 1.1 tileset.json referencing the generated GLB tiles')
     parser.add_argument('--tileset-origin', type=str, default=None,
@@ -1827,7 +1829,7 @@ def main():
                 write_tileset=args.write_tileset,
                 tileset_transform=tileset_transform,
                 tileset_transform_info=tileset_transform_info,
-                uv_eps=args.uv_eps,
+                uv_eps_ratio=args.uv_eps_ratio,
             )
         else:
             if args.split_meshes:
