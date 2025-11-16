@@ -12,6 +12,17 @@ let SSE_THRESHOLD_COARSEN = DEFAULT_SSE_COARSEN;   // hysteresis (auto-updated)
 const MAX_CONCURRENT = 6;
 const MAX_CACHE_BYTES = 600 * 1024 * 1024; // ~600 MB budget
 const MAX_TILES = 500;
+const TILE_DEBUG_COLORS = [
+  0x4e79a7, 0xa0cbe8, 0xf28e2b, 0xffbe7a, 0xe15759,
+  0xff9d9a, 0x76b7b2, 0x86bcb6, 0x59a14f, 0x8cd17d,
+  0xedc948, 0xb6992d, 0xb07aa1, 0xd4a6c8, 0xff9da7,
+  0x9c755f, 0xd7b5a6, 0xbab0ac, 0xd1d1d1, 0x7f7f7f
+];
+
+function pickDebugColor() {
+  const idx = Math.floor(Math.random() * TILE_DEBUG_COLORS.length);
+  return new THREE.Color(TILE_DEBUG_COLORS[idx]);
+}
 
 function deduceTileBaseUrl(manifestUrl, manifest) {
   if (!manifestUrl) return null;
@@ -586,7 +597,7 @@ class TileManager {
           o.material = newMaterial;
           o.userData.debugInfo = {
             originalMaterial: newMaterial,
-            debugColor: new THREE.Color().setHSL(Math.random(), 0.7, 0.5),
+            debugColor: pickDebugColor(),
             originalColorAttr: o.geometry && o.geometry.attributes && o.geometry.attributes.color
               ? o.geometry.attributes.color.clone()
               : null,
@@ -595,7 +606,7 @@ class TileManager {
 
           if (!(o.geometry && o.geometry.attributes.color)) {
             o.material = new THREE.MeshStandardMaterial({
-              color: new THREE.Color().setHSL(Math.random(), 0.8, 0.6),
+              color: pickDebugColor(),
               vertexColors: false,
               transparent: false,
               opacity: 1.0,
