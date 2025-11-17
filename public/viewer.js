@@ -996,6 +996,7 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     extract: DEFAULT_EXTRACT,
     time: '0',
     sseRefine: SSE_THRESHOLD_REFINE,
+    preserveCameraView: false,
     wireframe: false,
     boundingBoxes: true,
     tileColorMode: false,
@@ -1025,6 +1026,7 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   let userAdjustedSSE = false;
   let timeIsSlider = false;
   let extractsCache = [];
+  let hasLoadedDataset = false;
 
   function applyWireframe(wireframe) {
     const apply = (obj) => {
@@ -1261,7 +1263,10 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     SSE_THRESHOLD_REFINE = 1e6;
     SSE_THRESHOLD_COARSEN = 5e5;
     await mgr.init(manifestUrl);
-    recenterCamera();
+    if (!settings.preserveCameraView || !hasLoadedDataset) {
+      recenterCamera();
+    }
+    hasLoadedDataset = true;
     const calibrated = ENABLE_SSE_AUTO_CALIBRATION ? calibrateSSEThreshold() : false;
     if (!calibrated) {
       SSE_THRESHOLD_REFINE = settings.sseRefine;
@@ -1365,6 +1370,8 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
 
   diagnosticsFolder.open();
   lodFolder.open();
+
+  datasetFolder.add(settings, 'preserveCameraView').name('Preserve camera view');
 
   // Update on controls change
   controls.addEventListener('change', () => mgr.tick());
