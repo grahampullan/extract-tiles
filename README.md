@@ -95,6 +95,7 @@ python3 build_tiles.py \
 - `--write_tileset`: Emit a 3D Tiles 1.1 `tileset_<time>.json` alongside the manifest (uses the `3DTILES_content_gltf` extension to point at the existing GLB tiles)
 - `--tileset-origin`: When used with `--write_tileset`, place the tileset root in an ENU frame centred on the supplied WGS84 `lat,lon[,height]`
 - `--tileset-scale`: Optional uniform scale factor applied at the tileset root (default 1.0)
+- `--debug_scene`: Print the glTF scene graph and per-primitive attribute summary while loading (handy when validating GLB exports)
 
 During import, any PBR base-colour textures are baked into per-vertex `COLOR_0` attributes so that world-space tiles can render with colour without shipping textures.
 

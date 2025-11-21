@@ -111,7 +111,13 @@ def summarize_colors(path: Path):
                 if colour_data is not None:
                     print(f"    COLOR_0 count={len(colour_data)}, dtype={colour_data.dtype}")
                     print(f"    COLOR_0 sample={colour_data[:5]}")
-            elif attr_dict.get('TEXCOORD_0') is not None:
+            texcoord_keys = [k for k in attr_dict.keys() if k.startswith('TEXCOORD_')]
+            for key in texcoord_keys:
+                tex_data = read_accessor(gltf, buffers, attr_dict[key])
+                if tex_data is not None:
+                    print(f"    {key} count={len(tex_data)}, dtype={tex_data.dtype}, sample={tex_data[:3]}")
+
+            if colour_data is None and attr_dict.get('TEXCOORD_0') is not None:
                 tex_info = None
                 if mat_idx is not None and gltf.materials:
                     mat = gltf.materials[mat_idx]

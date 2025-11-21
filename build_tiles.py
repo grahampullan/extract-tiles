@@ -29,9 +29,47 @@ UV_EPS_RATIO      = 0.01        # UV overlap margin ratio (~1%)
 WORLD_EPS_RATIO   = 0.01        # world overlap margin (~1% of node size)
 MAX_DEPTH         = 5
 
+# Debug toggles
+DEBUG_SCENE_GRAPH = False
+
 # ============================================================================
 # Shared Utilities
 # ============================================================================
+
+def _debug_print_scene_graph(gltf, label):
+    if not DEBUG_SCENE_GRAPH:
+        return
+
+    scenes = gltf.scenes or []
+    nodes = gltf.nodes or []
+    meshes = gltf.meshes or []
+
+    print(f"[debug] {label}: {len(scenes)} scenes, {len(nodes)} nodes, {len(meshes)} meshes")
+
+    def describe_node(node_idx, depth=0):
+        node = nodes[node_idx]
+        parts = [f"node[{node_idx}]"]
+        if getattr(node, "name", None):
+            parts.append(f"name='{node.name}'")
+        if getattr(node, "mesh", None) is not None:
+            m_idx = node.mesh
+            mesh_name = meshes[m_idx].name if m_idx < len(meshes) and getattr(meshes[m_idx], "name", None) else None
+            parts.append(f"mesh={m_idx}{f' ({mesh_name})' if mesh_name else ''}")
+        if getattr(node, "children", None):
+            parts.append(f"children={node.children}")
+        indent = "  " * depth
+        print(f"{indent}- {' | '.join(parts)}")
+        for child in getattr(node, "children", []) or []:
+            if child is not None and child < len(nodes):
+                describe_node(child, depth + 1)
+
+    for scene_idx, scene in enumerate(scenes):
+        root_nodes = getattr(scene, "nodes", []) or []
+        print(f"[debug] Scene {scene_idx} roots -> {root_nodes}")
+        for node_idx in root_nodes:
+            if node_idx is not None and node_idx < len(nodes):
+                describe_node(node_idx, 1)
+
 
 def _load_gltf_with_buffers(path: str):
     """Load a glTF/GLB file and return (GLTF2, list[bytes])."""
@@ -342,6 +380,7 @@ def _triangulate_indices(raw_idx: Optional[np.ndarray], mode: Optional[int], ver
 def load_glb_arrays(path):
     """Load GLB/GLTF file and extract arrays for vertices, UVs, colors, and indices."""
     gltf, buffers = _load_gltf_with_buffers(path)
+    _debug_print_scene_graph(gltf, f"{path} (combined)")
     bake_textures_to_vertex_colors(gltf, buffers)
     to_np = _make_accessor_reader(gltf, buffers)
 
@@ -352,8 +391,11 @@ def load_glb_arrays(path):
     v_offset = 0
 
     # Iterate all meshes/primitives
-    for mesh in (gltf.meshes or []):
-        for prim in (mesh.primitives or []):
+    for mesh_idx, mesh in enumerate(gltf.meshes or []):
+        for prim_idx, prim in enumerate(mesh.primitives or []):
+            if DEBUG_SCENE_GRAPH:
+                attr_map = dict(getattr(getattr(prim, "attributes", None), "__dict__", {}) or {})
+                print(f"[debug]   mesh[{mesh_idx}] prim[{prim_idx}] attributes={list(attr_map.keys())}")
             pos = to_np(prim.attributes.POSITION)
             if pos is None or pos.size == 0:
                 continue
@@ -366,8 +408,16 @@ def load_glb_arrays(path):
 
             # Optional attributes
             uv = None
-            if hasattr(prim.attributes, 'TEXCOORD_0') and prim.attributes.TEXCOORD_0 is not None:
-                uv = to_np(prim.attributes.TEXCOORD_0).astype(np.float32)
+            uv_slot = None
+            for uv_key in ('TEXCOORD_0', 'TEXCOORD_1', 'TEXCOORD_2'):
+                if hasattr(prim.attributes, uv_key):
+                    acc_idx = getattr(prim.attributes, uv_key)
+                    if acc_idx is not None:
+                        data = to_np(acc_idx)
+                        if data is not None:
+                            uv = data.astype(np.float32)
+                            uv_slot = uv_key
+                            break
 
             col = None
             if hasattr(prim.attributes, 'COLOR_0') and prim.attributes.COLOR_0 is not None:
@@ -395,6 +445,9 @@ def load_glb_arrays(path):
             all_idx.append(idx)
             v_offset += pos.shape[0]
 
+            if DEBUG_SCENE_GRAPH:
+                print(f"[debug]   mesh[{mesh_idx}] prim[{prim_idx}] -> verts {pos.shape[0]}, faces {tri_idx.shape[0]//3}, uv={uv_slot or 'no'}, color={'yes' if col is not None else 'no'}")
+
     if not all_pos:
         raise RuntimeError("No meshes/primitives found in GLB/GLTF source.")
 
@@ -411,12 +464,16 @@ def load_glb_arrays(path):
 def load_glb_mesh_primitives(path):
     """Load GLB/GLTF and return per-primitive arrays (positions, uv, colors, indices)."""
     gltf, buffers = _load_gltf_with_buffers(path)
+    _debug_print_scene_graph(gltf, f"{path} (per-primitive)")
     bake_textures_to_vertex_colors(gltf, buffers)
     to_np = _make_accessor_reader(gltf, buffers)
 
     meshes = []
     for mesh_idx, mesh in enumerate(gltf.meshes or []):
         for prim_idx, prim in enumerate(mesh.primitives or []):
+            if DEBUG_SCENE_GRAPH:
+                attr_map = dict(getattr(getattr(prim, "attributes", None), "__dict__", {}) or {})
+                print(f"[debug]   mesh[{mesh_idx}] prim[{prim_idx}] attributes={list(attr_map.keys())}")
             pos = to_np(prim.attributes.POSITION)
             if pos is None:
                 continue
@@ -427,10 +484,16 @@ def load_glb_mesh_primitives(path):
                 continue
 
             uv = None
-            if hasattr(prim.attributes, 'TEXCOORD_0') and prim.attributes.TEXCOORD_0 is not None:
-                uv = to_np(prim.attributes.TEXCOORD_0)
-                if uv is not None:
-                    uv = uv.astype(np.float32)
+            uv_slot = None
+            for uv_key in ('TEXCOORD_0', 'TEXCOORD_1', 'TEXCOORD_2'):
+                if hasattr(prim.attributes, uv_key):
+                    acc_idx = getattr(prim.attributes, uv_key)
+                    if acc_idx is not None:
+                        data = to_np(acc_idx)
+                        if data is not None:
+                            uv = data.astype(np.float32)
+                            uv_slot = uv_key
+                            break
 
             col = None
             if hasattr(prim.attributes, 'COLOR_0') and prim.attributes.COLOR_0 is not None:
@@ -459,6 +522,9 @@ def load_glb_mesh_primitives(path):
                 "uv": uv,
                 "colors": col,
             })
+
+            if DEBUG_SCENE_GRAPH:
+                print(f"[debug]   mesh[{mesh_idx}] prim[{prim_idx}] stored -> verts {pos.shape[0]}, faces {tri_idx.shape[0]//3}, uv={uv_slot or 'no'}")
 
     return meshes
 
@@ -550,47 +616,35 @@ def o3d_from_trimesh(m):
     g.compute_vertex_normals()
     return g
 
-def transfer_attrs_nn(orig_pos, uv, col, simp_pos):
-    """Transfer attributes using interpolation for colors, nearest-neighbor for UV"""
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(orig_pos.astype(np.float64))
-    kdt = o3d.geometry.KDTreeFlann(pcd)
+def transfer_attrs_nn(orig_pos, uv, col, simp_pos, kdtree=None):
+    """Transfer attributes using nearest-neighbor lookup in the original mesh."""
+    need_uv = uv is not None
+    need_col = col is not None
+    if not (need_uv or need_col):
+        return None, None
+
+    if kdtree is None:
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(orig_pos.astype(np.float64))
+        kdtree = o3d.geometry.KDTreeFlann(pcd)
 
     simp_uv = np.zeros((simp_pos.shape[0],2), np.float32) if uv is not None else None
     simp_col = np.zeros((simp_pos.shape[0],4), np.uint8) if col is not None else None
 
     for i, p in enumerate(simp_pos):
+        _, idx, _ = kdtree.search_knn_vector_3d(p.astype(np.float64), 1)
+        j = idx[0]
         if simp_uv is not None:
-            # Use nearest neighbor for UV (discrete mapping)
-            _, idx, _ = kdt.search_knn_vector_3d(p.astype(np.float64), 1)
-            j = idx[0]
             simp_uv[i] = uv[j]
-
         if simp_col is not None:
-            # Use k-nearest neighbors with distance-weighted interpolation for colors
-            k = min(4, len(orig_pos))  # Use up to 4 neighbors
-            _, idx, dists = kdt.search_knn_vector_3d(p.astype(np.float64), k)
-
-            # Convert distances to weights (closer = higher weight)
-            weights = 1.0 / (np.array(dists) + 1e-8)  # Add small epsilon to avoid division by zero
-            weights = weights / weights.sum()  # Normalize
-
-            # Weighted average of colors
-            if col.dtype==np.uint8 and col.shape[1]==4:
-                # For RGBA colors, interpolate each channel
-                interp_color = np.zeros(4, dtype=np.float32)
-                for w, j in zip(weights, idx):
-                    interp_color += w * col[j].astype(np.float32)
-                simp_col[i] = np.clip(interp_color, 0, 255).astype(np.uint8)
+            if col.dtype == np.uint8 and col.shape[1] == 4:
+                simp_col[i] = col[j]
             else:
-                # For RGB colors
-                interp_color = np.zeros(3, dtype=np.float32)
-                for w, j in zip(weights, idx):
-                    interp_color += w * np.clip(col[j], 0, 1)
-                rgb = (interp_color * 255).astype(np.uint8)
+                rgb = np.clip(col[j], 0, 1)
+                rgb = (rgb * 255).astype(np.uint8)
                 simp_col[i] = np.array([*rgb, 255], np.uint8)
 
-    return simp_uv, simp_col
+    return simp_uv, simp_col, kdtree
 
 def estimate_bytes(nv, nf, has_uv=True, has_col=True):
     """Estimate GLB file size in bytes"""
@@ -826,8 +880,10 @@ def decimate_to_target(m: tm.Trimesh, target_bytes, min_ratio=0.02, min_tris=32,
     """Iteratively decimate mesh until it meets the target byte budget."""
     src_uv = getattr(m.visual, 'uv', None)
     src_col = getattr(m.visual, 'vertex_colors', None)
+    src_pos = np.asarray(m.vertices, dtype=np.float32)
 
     current = m.copy()
+    attr_tree = None
     for iteration in range(max_iter):
         cur_size = estimate_bytes(len(current.vertices), len(current.faces),
                                   src_uv is not None, src_col is not None)
@@ -848,11 +904,12 @@ def decimate_to_target(m: tm.Trimesh, target_bytes, min_ratio=0.02, min_tris=32,
         if simp_faces.shape[0] == 0 or simp_pos.shape[0] == 0:
             break
 
-        simp_uv, simp_col = transfer_attrs_nn(
-            np.asarray(current.vertices),
+        simp_uv, simp_col, attr_tree = transfer_attrs_nn(
+            src_pos,
             src_uv,
             src_col,
-            simp_pos
+            simp_pos,
+            kdtree=attr_tree
         )
 
         next_mesh = tm.Trimesh(vertices=simp_pos, faces=simp_faces, process=False)
@@ -867,6 +924,7 @@ def decimate_to_target(m: tm.Trimesh, target_bytes, min_ratio=0.02, min_tris=32,
             break
 
         current = next_mesh
+        src_pos = np.asarray(current.vertices, dtype=np.float32)
 
     return current
 
@@ -1725,6 +1783,8 @@ def main():
                        help='Relative snap tolerance as a fraction of tile diagonal (set 0 to disable)')
     parser.add_argument('--world_eps_ratio', type=float, default=WORLD_EPS_RATIO,
                        help='Overlap margin ratio for world-space octree bounds (default 0.01)')
+    parser.add_argument('--debug_scene', action='store_true',
+                        help='Print glTF scene graph summaries while loading (diagnostic)')
 
     parser.add_argument('--snapshots', action='store_true',
                         help='Process all GLB files in --input_dir as sequential time steps')
@@ -1750,6 +1810,8 @@ def main():
                        help='Uniform scale factor applied at the tileset root when --write_tileset is used (default 1.0)')
 
     args = parser.parse_args()
+    global DEBUG_SCENE_GRAPH
+    DEBUG_SCENE_GRAPH = bool(args.debug_scene)
     world_eps_ratio = args.world_eps_ratio if args.world_eps_ratio is not None else WORLD_EPS_RATIO
 
     if args.snapshots:
