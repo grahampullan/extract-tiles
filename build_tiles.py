@@ -956,7 +956,7 @@ def voxel_cluster_trimesh(mesh: tm.Trimesh, voxel_size: float) -> Optional[tm.Tr
         return None
     vertices = np.asarray(clustered.vertices, dtype=np.float32)
 
-    new_uv, new_col = transfer_attrs_nn(orig_pos, orig_uv, orig_col, vertices)
+    new_uv, new_col, _ = transfer_attrs_nn(orig_pos, orig_uv, orig_col, vertices)
 
     clustered_trimesh = tm.Trimesh(vertices=vertices, faces=triangles.astype(np.uint32), process=False)
     if new_uv is not None:

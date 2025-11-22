@@ -1020,6 +1020,7 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   let tileColorController = null;
   let simpleShadingController = null;
   let sseRefineController = null;
+  let preserveCameraController = null;
   let suppressTileColorHandler = false;
   let suppressSimpleShadingHandler = false;
   let suppressSseHandler = false;
@@ -1027,6 +1028,12 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   let timeIsSlider = false;
   let extractsCache = [];
   let hasLoadedDataset = false;
+  let currentManifestKey = null;
+  let currentExtract = null;
+  let userToggledPreserveCamera = false;
+  let currentDatasetHasMultipleTimes = false;
+  let autoEnabledPreserveCamera = false;
+  let suppressPreserveHandler = false;
 
   function applyWireframe(wireframe) {
     const apply = (obj) => {
@@ -1185,6 +1192,7 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
 
     const selected = extractsCache.find(e => e.name === settings.extract);
     const times = selected && selected.times && selected.times.length ? selected.times : [0];
+    currentDatasetHasMultipleTimes = times.length > 1;
 
     if (!times.includes(Number(settings.time))) {
       settings.time = String(times[0]);
@@ -1204,7 +1212,16 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
       settings.timeIndex = Number(settings.time);
       timeController = datasetFolder.add(settings, 'timeIndex', min, max, 1).name('Time');
       timeController.onChange((value) => {
-        settings.time = String(Math.round(value));
+        const rounded = Math.round(value);
+        const clamped = Math.min(Math.max(rounded, min), max);
+        settings.timeIndex = clamped;
+        const newTime = String(clamped);
+        const manifestKey = `${settings.extract}:${newTime}`;
+        if (currentManifestKey === manifestKey) {
+          settings.time = newTime;
+          return;
+        }
+        settings.time = newTime;
         loadManifest();
       });
       timeController.updateDisplay?.();
@@ -1212,6 +1229,11 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
       const timeStrings = times.map(t => t.toString());
       timeController = datasetFolder.add(settings, 'time', timeStrings).name('Time');
       timeController.onChange((value) => {
+        const manifestKey = `${settings.extract}:${value}`;
+        if (currentManifestKey === manifestKey) {
+          settings.time = value;
+          return;
+        }
         settings.time = value;
         loadManifest();
       });
@@ -1256,6 +1278,20 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
 
   async function loadManifest() {
     const manifestUrl = `/manifest/${settings.extract}/${settings.time}.json`;
+    const extractChanged = currentExtract !== settings.extract;
+    if (extractChanged) {
+      currentExtract = settings.extract;
+      hasLoadedDataset = false;
+      autoEnabledPreserveCamera = false;
+      if (!userToggledPreserveCamera && settings.preserveCameraView) {
+        settings.preserveCameraView = false;
+        if (preserveCameraController) {
+          suppressPreserveHandler = true;
+          preserveCameraController.setValue(false);
+          suppressPreserveHandler = false;
+        }
+      }
+    }
     mgr.showBoundingBoxes = settings.boundingBoxes;
     mgr.simpleShadingMode = settings.simpleShading;
     mgr.wireframeMode = settings.wireframe;
@@ -1266,7 +1302,25 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     if (!settings.preserveCameraView || !hasLoadedDataset) {
       recenterCamera();
     }
-    hasLoadedDataset = true;
+    if (!hasLoadedDataset) {
+      hasLoadedDataset = true;
+      if (!settings.preserveCameraView && currentDatasetHasMultipleTimes && !userToggledPreserveCamera) {
+        settings.preserveCameraView = true;
+        if (preserveCameraController) {
+          suppressPreserveHandler = true;
+          preserveCameraController.setValue(true);
+          suppressPreserveHandler = false;
+        }
+        autoEnabledPreserveCamera = true;
+      }
+    } else if (currentDatasetHasMultipleTimes && autoEnabledPreserveCamera && !settings.preserveCameraView) {
+      settings.preserveCameraView = true;
+      if (preserveCameraController) {
+        suppressPreserveHandler = true;
+        preserveCameraController.setValue(true);
+        suppressPreserveHandler = false;
+      }
+    }
     const calibrated = ENABLE_SSE_AUTO_CALIBRATION ? calibrateSSEThreshold() : false;
     if (!calibrated) {
       SSE_THRESHOLD_REFINE = settings.sseRefine;
@@ -1280,6 +1334,7 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
       applySimpleShadingState(true);
     }
     schedulePrefetchNeighbours(settings, extractsCache);
+    currentManifestKey = `${settings.extract}:${settings.time}`;
   }
 
   async function loadExtractsList() {
@@ -1371,7 +1426,15 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   diagnosticsFolder.open();
   lodFolder.open();
 
-  datasetFolder.add(settings, 'preserveCameraView').name('Preserve camera view');
+  preserveCameraController = datasetFolder.add(settings, 'preserveCameraView').name('Preserve camera view').onChange((value) => {
+    settings.preserveCameraView = value;
+    if (!suppressPreserveHandler) {
+      userToggledPreserveCamera = true;
+    }
+    if (!value) {
+      autoEnabledPreserveCamera = false;
+    }
+  });
 
   // Update on controls change
   controls.addEventListener('change', () => mgr.tick());
