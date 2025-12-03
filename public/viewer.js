@@ -1002,13 +1002,17 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     tileColorMode: false,
     simpleShading: true,
     wireframeOverlay: false,
-    wireframeOverlayOpacity: 1.0
+    wireframeOverlayOpacity: 1.0,
+    showAxes: false
   };
 
   mgr.showBoundingBoxes = settings.boundingBoxes;
   mgr.simpleShadingMode = settings.simpleShading;
   mgr.wireOverlayOpacity = settings.wireframeOverlayOpacity;
   mgr.applyWireOverlayState(settings.wireframeOverlay);
+  const axesHelper = new THREE.AxesHelper(0.5);
+  axesHelper.visible = settings.showAxes;
+  scene.add(axesHelper);
 
   const gui = new GUI({ width: 300 });
   const datasetFolder = gui.addFolder('Dataset');
@@ -1378,6 +1382,11 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     settings.boundingBoxes = value;
     mgr.showBoundingBoxes = value;
     mgr.updateBoundingBoxVisibility();
+  });
+
+  diagnosticsFolder.add(settings, 'showAxes').name('Axes helper').onChange((value) => {
+    settings.showAxes = value;
+    axesHelper.visible = value;
   });
 
   tileColorController = diagnosticsFolder.add(settings, 'tileColorMode').name('Tile Colours').onChange((value) => {
