@@ -1,6 +1,7 @@
 /resources/
 /tiles_out/
 /node_modules/
+/dev_notes/
 # Large generated assets
 /examples/**/*.glb
 /examples/**/*.gltf

@@ -78,14 +78,16 @@ def main() -> None:
     total_levels = sorted(per_level)
 
     print(f"Manifest: {args.manifest}")
-    print("Level | Tiles | Triangles | Size")
-    print("------|-------|-----------|------")
+    print("| Level | Tiles | Total triangles | Total size | Mean size/tile |")
+    print("|-------|-------|----------------|------------|----------------|")
     for level in total_levels:
         info = per_level[level]
         tiles = int(info["count"])
         tris = int(info["triangles"])
-        size = format_bytes(info["bytes"])
-        print(f"{level:5d} | {tiles:5d} | {tris:9,d} | {size}")
+        total_bytes = info["bytes"]
+        size = format_bytes(total_bytes)
+        mean_size = format_bytes(total_bytes / max(tiles, 1))
+        print(f"| {level:5d} | {tiles:5d} | {tris:14,d} | {size:>10} | {mean_size:>14} |")
 
 
 if __name__ == "__main__":
