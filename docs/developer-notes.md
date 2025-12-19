@@ -81,7 +81,20 @@ Static manifests (those declaring `layout.type = "static-octree"`) can skip the 
 
 Legacy datasets operate exactly as before: the scene clears, caches reset, and tiles reload per manifest.
 
-### 2.3 Diagnostics & Settings
+### 2.3 Major Code Sections
+
+| Section | Description |
+| --- | --- |
+| **TileManager core** | Constructor sets up HUD refs and caches; `_decide`, `_tickOnce`, `_enqueue`, `_sortQueue`, `_load`, `_installTile`, `_unload`, `_cacheInsert` drive SSE evaluation, loading, caching, and static layout swaps. |
+| **Diagnostics helpers** | `_applyTileColor`, `_applySimpleShading`, `_applyOverlayBaseShading`, `_restoreTileMaterial`, `_setWireOverlayVisible`, `_createWireOverlay`, `_applyWireOverlayMaterial`, `_disposeWireOverlay` handle colour overlays, shading, and wireframe edges. |
+| **AABB & visibility utilities** | `_updateFrustum`, `_visible`, `_createBoundingBoxHelper`, `updateBoundingBoxVisibility` keep culling accurate without per-frame allocations. |
+| **Resource disposal** | `_disposeMaterial`, `_disposeRecord`, and cache eviction paths ensure geometries/materials/textures release GPU RAM. |
+| **Static layout orchestration** | `_useStaticLayout`, `_tileMatchesTime`, `_staticRootsAtTargetTime`, `_installTile`, and the `loadManifest()` logic decide when to reuse meshes and when to clear/reset. |
+| **Prefetch & LOD HUD** | `prefetchRootTiles`, `schedulePrefetchNeighbours`, HUD (`lod`, `tiles`, `cache`) elements surface streaming state to the user. |
+| **GUI setup** | The Dat.GUI folders under Dataset/LOD/Diagnostics configure extracts, time sliders, SSE thresholds, diagnostics toggles, and static reuse behaviour. |
+| **Renderer bootstrap** | Scene/camera/controls/axes helper creation plus the animation loop at the bottom wire everything into Three.js and OrbitControls. |
+
+### 2.4 Diagnostics & Settings
 `settings` now includes `staticReuse` (default `true`). The Diagnostics GUI exposes a “Static layout reuse” checkbox that flips `mgr.staticReuseDisabled`. Other controls remain:
 - Wireframe & wireframe overlay toggles
 - Bounding boxes and axes helper

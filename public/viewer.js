@@ -115,6 +115,9 @@ class TileManager {
     this.currentTimeIndex = null;
     this.targetTimeIndex = null;
     this.staticRefreshPending = false;
+    this._visibleMin = new THREE.Vector3();
+    this._visibleMax = new THREE.Vector3();
+    this._visibleBox = new THREE.Box3(this._visibleMin, this._visibleMax);
   }
 
   _useStaticLayout() {
@@ -165,9 +168,10 @@ class TileManager {
   }
 
   _visible(meta) {
-    const min = new THREE.Vector3(...meta.aabbWorld[0]);
-    const max = new THREE.Vector3(...meta.aabbWorld[1]);
-    return this.frustum.intersectsBox(new THREE.Box3(min, max));
+    if (!meta || !meta.aabbWorld) return false;
+    this._visibleMin.fromArray(meta.aabbWorld[0]);
+    this._visibleMax.fromArray(meta.aabbWorld[1]);
+    return this.frustum.intersectsBox(this._visibleBox);
   }
 
   _allChildrenLoaded(meta) {
@@ -226,6 +230,22 @@ class TileManager {
     }
   }
 
+  _disposeMaterial(material) {
+    if (!material) return;
+    if (Array.isArray(material)) {
+      material.forEach(m => this._disposeMaterial(m));
+      return;
+    }
+    const keys = Object.keys(material);
+    for (const key of keys) {
+      const value = material[key];
+      if (value && typeof value === "object" && value.isTexture) {
+        value.dispose?.();
+      }
+    }
+    material.dispose?.();
+  }
+
   _disposeRecord(rec) {
     if (!rec) return;
     if (rec.obj3d) {
@@ -233,8 +253,7 @@ class TileManager {
         if (o.isMesh || o.isLine) {
           o.geometry?.dispose();
           if (o.material) {
-            if (o.material.map) o.material.map.dispose();
-            o.material.dispose?.();
+            this._disposeMaterial(o.material);
           }
         }
         if (o.userData?.wireOverlay) {
@@ -252,7 +271,8 @@ class TileManager {
     if (!mesh.isMesh || !mesh.geometry) return;
     if (mesh.userData?.wireOverlay) return;
     try {
-      const edgesGeo = new THREE.EdgesGeometry(mesh.geometry, 0);
+      const threshold = Number.isFinite(this.wireOverlayAngle) ? this.wireOverlayAngle : 0;
+      const edgesGeo = new THREE.EdgesGeometry(mesh.geometry, threshold);
       const edgesMat = new THREE.LineBasicMaterial({
         color: 0xffffff,
         transparent: true,
@@ -266,10 +286,18 @@ class TileManager {
       const edges = new THREE.LineSegments(edgesGeo, edgesMat);
       edges.renderOrder = 1;
       mesh.add(edges);
+      this._applyWireOverlayMaterial(edges);
       mesh.userData.wireOverlay = edges;
     } catch (err) {
       console.warn("Failed to create wire overlay", err);
     }
+  }
+
+  _applyWireOverlayMaterial(overlay) {
+    if (!overlay || !overlay.material) return;
+    overlay.material.transparent = true;
+    overlay.material.opacity = this.wireOverlayOpacity ?? 0.9;
+    overlay.material.needsUpdate = true;
   }
 
   _setWireOverlayVisible(obj, visible) {
@@ -282,7 +310,7 @@ class TileManager {
         }
         if (o.userData?.wireOverlay) {
           o.userData.wireOverlay.visible = true;
-          o.userData.wireOverlay.material.opacity = 1.0;
+          this._applyWireOverlayMaterial(o.userData.wireOverlay);
         }
       } else if (o.userData?.wireOverlay) {
         o.userData.wireOverlay.visible = false;
@@ -660,17 +688,16 @@ class TileManager {
           glb = await this.loader.loadAsync(tileUrl);
         }
         if (versionAtStart !== this.manifestVersion) {
-          glb.scene.traverse(o => {
-            if (o.isMesh) {
-              o.geometry?.dispose();
-              if (o.material) {
-                if (o.material.map) o.material.map.dispose();
-                o.material.dispose?.();
-              }
+        glb.scene.traverse(o => {
+          if (o.isMesh || o.isLine) {
+            o.geometry?.dispose();
+            if (o.material) {
+              this._disposeMaterial(o.material);
             }
-          });
-          return null;
-        }
+          }
+        });
+        return null;
+      }
         const obj = glb.scene;
         obj.userData.tileId = id;
 
@@ -841,8 +868,7 @@ class TileManager {
           if (o.isMesh || o.isLine) {
             o.geometry?.dispose();
             if (o.material) {
-              if (o.material.map) o.material.map.dispose();
-              o.material.dispose?.();
+              this._disposeMaterial(o.material);
             }
           }
         });
@@ -1023,8 +1049,7 @@ class TileManager {
         if (o.isMesh || o.isLine) {
           o.geometry?.dispose();
           if (o.material) {
-            if (o.material.map) o.material.map.dispose();
-            o.material.dispose?.();
+            this._disposeMaterial(o.material);
           }
         }
       });
@@ -1420,6 +1445,8 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   async function loadManifest() {
     const manifestUrl = `/manifest/${settings.extract}/${settings.time}.json`;
     const extractChanged = currentExtract !== settings.extract;
+    prefetchedTileBuffers.clear();
+    prefetchInFlight.clear();
     let manifest = null;
     try {
       const response = await fetch(manifestUrl);
@@ -1629,4 +1656,3 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   // Initialize
   await loadExtractsList();
 })();
-    this.rootTileIds = new Set();
