@@ -1395,6 +1395,25 @@ def in_aabb_half_open(points, aabb):
     mn, mx = aabb
     return np.all((points >= mn - 1e-9) & (points < mx - 1e-12), axis=1)
 
+def compute_global_world_bounds(glb_paths: List[Path]):
+    """Scan multiple GLBs and return the union world-space AABB."""
+    global_min = None
+    global_max = None
+    for path in glb_paths:
+        pos, _, _, _ = load_glb_arrays(str(path))
+        mn, mx = world_aabb(pos)
+        print(f"[static-octree] {path.name}: world min={mn.tolist()} max={mx.tolist()}")
+        if global_min is None:
+            global_min = mn.copy()
+            global_max = mx.copy()
+        else:
+            global_min = np.minimum(global_min, mn)
+            global_max = np.maximum(global_max, mx)
+    if global_min is None or global_max is None:
+        raise RuntimeError("Could not compute global bounds; no GLB data found.")
+    print(f"[static-octree] Union bounds: min={global_min.tolist()} max={global_max.tolist()}")
+    return (global_min, global_max)
+
 
 def subset_trimesh_by_mask(pos, idx, mask, uv=None, col=None):
     """Create subset mesh from triangle mask (world-space version)"""
@@ -1430,14 +1449,18 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                        write_tileset=False,
                        tileset_transform=None,
                        tileset_transform_info=None,
-                       border_projection=False):
+                       border_projection=False,
+                       forced_scene_aabb=None,
+                       layout_type=None,
+                       emit_empty_tiles=False):
     """Build world-space octree tiles"""
     print(f"[world] using world_eps_ratio={world_eps_ratio}")
     pos, uv, col, idx = load_glb_arrays(src_glb)
 
     triA = tri_areas(pos, idx)
     cent = tri_centroids_world(pos, idx)
-    scene_aabb = world_aabb(pos)
+    base_aabb = forced_scene_aabb if forced_scene_aabb is not None else world_aabb(pos)
+    scene_aabb = (np.array(base_aabb[0], dtype=np.float64), np.array(base_aabb[1], dtype=np.float64))
 
     manifest = {
         "extract": extract,
@@ -1449,12 +1472,15 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
         "targetTileBytes": target_bytes,
         "global": {
             "triCount": int(len(triA)),
-            "avgTriArea": float(triA.mean()),
-            "minTriArea": float(triA.min())
+            "avgTriArea": float(triA.mean()) if len(triA) else 0.0,
+            "minTriArea": float(triA.min()) if len(triA) else 0.0,
+            "aabbWorld": [scene_aabb[0].tolist(), scene_aabb[1].tolist()]
         },
         "charts": 0,
         "tiles": []
     }
+    if layout_type:
+        manifest["layout"] = {"type": layout_type}
 
     extract_root = Path(out_dir) / extract
 
@@ -1472,16 +1498,15 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                     mask = in_aabb(cent, aabb_loose)
 
                     m = subset_trimesh_by_mask(pos, idx, mask, uv=None, col=col)
-                    if m is None:
-                        continue
-                    orig_triangles = len(m.faces)
-                    if orig_triangles == 0:
+                    has_mesh = m is not None and len(m.faces) > 0
+                    orig_triangles = len(m.faces) if has_mesh else 0
+
+                    if not has_mesh and not emit_empty_tiles:
                         continue
 
                     orig_border_pts = None
                     snap_tol = None
-                    preserve_this_tile = preserve_borders and z > 0
-                    tile_diag_uv = math.sqrt(2) / (1 << z)
+                    preserve_this_tile = preserve_borders and z > 0 and has_mesh
                     if preserve_this_tile:
                         base_length = float(np.linalg.norm(m.bounds[1] - m.bounds[0])) or 1.0
                         if snap_radius is not None:
@@ -1494,13 +1519,15 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                                 unique_idx = np.unique(np.asarray(border_edges).flatten())
                                 orig_border_pts = np.asarray(m.vertices)[unique_idx]
 
-                    if not (skip_leaf_decimation and z == max_depth):
+                    if has_mesh and not (skip_leaf_decimation and z == max_depth):
                         m = decimate_to_target(m, target_bytes, min_ratio=min_ratio, min_tris=min_tris, max_iter=max_iter)
 
-                    approx = estimate_bytes(len(m.vertices), len(m.faces),
-                                           False, getattr(m.visual, 'vertex_colors', None) is not None)
+                    approx = 0
+                    if has_mesh:
+                        approx = estimate_bytes(len(m.vertices), len(m.faces),
+                                               False, getattr(m.visual, 'vertex_colors', None) is not None)
 
-                    if z == 0 and root_voxel_ratio is not None and approx > target_bytes * root_voxel_trigger:
+                    if has_mesh and z == 0 and root_voxel_ratio is not None and approx > target_bytes * root_voxel_trigger:
                         diag = float(np.linalg.norm(m.bounds[1] - m.bounds[0]))
                         if diag > 0:
                             voxel = max(root_voxel_ratio * diag, 1e-6)
@@ -1512,8 +1539,8 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                                 approx = estimate_bytes(len(m.vertices), len(m.faces),
                                                        False, getattr(m.visual, 'vertex_colors', None) is not None)
 
-                    decimated_triangles = len(m.faces)
-                    if orig_triangles > 0:
+                    if has_mesh and orig_triangles > 0:
+                        decimated_triangles = len(m.faces)
                         depth_decimation_samples.append((z, decimated_triangles / orig_triangles))
 
                     if preserve_this_tile:
@@ -1523,15 +1550,22 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                         elif orig_border_pts is not None and snap_tol is not None:
                             snap_decimated_border(m, orig_border_pts, snap_radius=snap_tol)
 
-                    aabb_min = m.bounds[0].tolist()
-                    aabb_max = m.bounds[1].tolist()
+                    if forced_scene_aabb is not None:
+                        tile_bounds = raw_aabb
+                    elif has_mesh:
+                        tile_bounds = (m.bounds[0], m.bounds[1])
+                    else:
+                        tile_bounds = raw_aabb
 
-                    approx = estimate_bytes(len(m.vertices), len(m.faces),
-                                           False, getattr(m.visual, 'vertex_colors', None) is not None)
+                    aabb_min = np.asarray(tile_bounds[0]).tolist()
+                    aabb_max = np.asarray(tile_bounds[1]).tolist()
 
                     tid = f"{z}/{i}/{j}/{k}"
                     kids = [f"{z+1}/{2*i+di}/{2*j+dj}/{2*k+dk}"
                            for di in (0,1) for dj in (0,1) for dk in (0,1)] if z<max_depth else []
+
+                    tri_count = int(len(m.faces)) if has_mesh else 0
+                    geom_error = float(np.mean(m.edges_unique_length)) if has_mesh and m.edges_unique_length.size>0 else 0.0
 
                     meta = {
                         "tileId": tid,
@@ -1539,13 +1573,18 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
                         "parent": f"{z-1}/{i>>1}/{j>>1}/{k>>1}" if z>0 else None,
                         "children": kids,
                         "aabbWorld": [aabb_min, aabb_max],
-                        "triCount": int(len(m.faces)),
-                        "avgTriArea": float(triA.mean()),
-                        "minTriArea": float(triA.min()),
-                        "geometricError": float(np.mean(m.edges_unique_length)) if m.edges_unique_length.size>0 else 0.0,
-                        "approxBytes": int(approx),
+                        "triCount": tri_count,
+                        "avgTriArea": float(triA.mean()) if len(triA) else 0.0,
+                        "minTriArea": float(triA.min()) if len(triA) else 0.0,
+                        "geometricError": geom_error,
+                        "approxBytes": int(approx) if has_mesh else 0,
                         "time": time_index
                     }
+
+                    if not has_mesh:
+                        if emit_empty_tiles:
+                            tiles_meta[tid] = {**meta, "actualBytes": 0, "url": None}
+                        continue
 
                     out_path = os.path.join(out_dir, extract, str(time_index),
                                            str(z), str(i), str(j), f"{k}.glb")
@@ -1783,6 +1822,8 @@ def main():
                        help='Relative snap tolerance as a fraction of tile diagonal (set 0 to disable)')
     parser.add_argument('--world_eps_ratio', type=float, default=WORLD_EPS_RATIO,
                        help='Overlap margin ratio for world-space octree bounds (default 0.01)')
+    parser.add_argument('--static_octree', action='store_true',
+                        help='World tiling: scan all timesteps and use a shared octree layout across manifests')
     parser.add_argument('--debug_scene', action='store_true',
                         help='Print glTF scene graph summaries while loading (diagnostic)')
 
@@ -1813,6 +1854,12 @@ def main():
     global DEBUG_SCENE_GRAPH
     DEBUG_SCENE_GRAPH = bool(args.debug_scene)
     world_eps_ratio = args.world_eps_ratio if args.world_eps_ratio is not None else WORLD_EPS_RATIO
+    static_octree = bool(args.static_octree)
+    if static_octree and args.tiling_space != 'world':
+        raise ValueError('--static_octree is only supported with --tiling_space world')
+    static_scene_aabb = None
+    layout_type = "static-octree" if static_octree else None
+    emit_empty_tiles = static_octree
 
     if args.snapshots:
         if args.input_dir is None:
@@ -1913,6 +1960,9 @@ def main():
                 tileset_transform=tileset_transform,
                 tileset_transform_info=tileset_transform_info,
                 border_projection=args.border_projection,
+                forced_scene_aabb=static_scene_aabb,
+                layout_type=layout_type,
+                emit_empty_tiles=emit_empty_tiles,
             )
 
     if args.snapshots:
@@ -1922,11 +1972,15 @@ def main():
         glb_files = sorted(p for p in input_dir.glob('*.glb'))
         if not glb_files:
             raise ValueError(f"No .glb files found in '{input_dir}'")
+        if static_octree:
+            static_scene_aabb = compute_global_world_bounds(glb_files)
         for offset, glb_path in enumerate(glb_files):
             time_idx = args.time + offset
             print(f"Processing snapshot {glb_path.name} (time={time_idx})")
             process_single(str(glb_path), time_idx)
     else:
+        if static_octree:
+            static_scene_aabb = compute_global_world_bounds([Path(args.in_glb)])
         process_single(args.in_glb, args.time)
 
 if __name__ == '__main__':
