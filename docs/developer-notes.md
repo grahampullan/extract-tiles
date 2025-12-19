@@ -1,222 +1,120 @@
 # Developer Notes: `build_tiles.py` & `public/viewer.js`
 
-This document explains how the tiler and viewer work under the hood. It dives into key functions, their dependencies, and how data flows from the source GLB into the on-screen scenegraph.
+This document summarises the current tiler/viewer pipeline, with emphasis on the new static-octree workflow that keeps the scene visible while timesteps swap in. Use it as a field guide when tweaking the builder CLI or hacking on the viewer.
 
 ---
 
 ## 1. `build_tiles.py`
 
-### 1.1. Module Overview
+### 1.1 Overview
+`build_tiles.py` ingests GLB snapshots and emits:
+- A manifest (`manifest_<time>.json`) describing every tile (AABB, children, `approxBytes`, etc.).
+- A directory of GLB tiles organised by depth and Morton coordinates.
+- Optional Cesium 3D Tiles 1.1 tileset metadata (`--write_tileset`).
 
-`build_tiles.py` is the command-line preprocessor that turns GLB meshes into multi-resolution tile hierarchies plus manifests consumed by the viewer. Entry point is `main()` → `build_uv_quadtree` **or** `build_world_octree`.
+The script supports two partitioning modes:
+- **UV quadtree** (`--tiling_space uv`): splits meshes per primitive, driven by UV bounds.
+- **World octree** (`--tiling_space world`): splits using spatial AABBs and triangle centroids.
 
-### 1.2. Shared Utilities (selected)
+Shared helper functions handle GLB loading (`load_glb_arrays` / `load_glb_mesh_primitives`), triangle metrics (`tri_areas`, `tri_centroids_world`), decimation (`decimate_to_target`), skirt generation, and seam snapping. All GLBs are created via `write_glb_from_trimesh`.
 
-| Function | Purpose |
-| --- | --- |
-| `load_glb_arrays(path)` | Bulk loader returning global position, UV, colour, index arrays across all primitives. Used when `--split_meshes` is false. |
-| `load_glb_mesh_primitives(path)` | Returns a list of `dict`s (positions/indices/UVs/colours) per primitive. Stays close to the glTF structure and keeps meshes separate for `--split_meshes`. |
-| `tri_areas`, `tri_centroids_world`, `uv_centroids` | Vectorised helpers to compute per-triangle areas and centroids (drives UV/world partitioning). |
-| `decimate_to_target(trimesh, target_bytes)` | Converts a `trimesh.Trimesh` into Open3D, runs quadric decimation until estimated size ≤ target × tolerance, and re-projects UV/colour attributes. |
-| `add_skirts(tri_mesh, skirt_h_ratio)` | Optional seam guard: duplicates boundary vertices, extrudes along normals, and rebuilds UV/colour arrays. |
-| `snap_decimated_border` / `project_vertices_to_cell_planes` | Seam repair routines used when `--preserve_borders` is enabled. The former snaps to nearest original seam points, the latter (world mode) projects vertices to analytic cell planes when `--border_projection` is set. |
-| `write_glb_from_trimesh(tri_mesh, meta, out_path)` | Minimal glTF writer using pygltflib. Creates buffer views/accessors for POSITION, TEXCOORD_0, COLOR_0, indices, and attaches `meta` as mesh extras. |
+### 1.2 Static Octree Mode (`--static_octree`)
+World-space tiling can now pre-align all timesteps so the viewer can reuse the spatial hierarchy:
+1. **Global extent scan** – when `--static_octree` is set, `compute_global_world_bounds()` runs before tiling. Each snapshot prints its min/max world coordinates and a final union summary. Only one GLB is loaded at a time, so memory usage stays flat.
+2. **Fixed scene bounds** – `build_world_octree` receives `forced_scene_aabb`. Every tile derives its child bounds from this shared AABB, ensuring identical `tileId`, `z/x/y/k`, and `aabbWorld` per manifest.
+3. **Manifest metadata** – manifests get `layout: { "type": "static-octree" }` plus `global.aabbWorld=[min,max]`. Viewers can detect this to enable mesh reuse.
+4. **Empty tiles** – if a tile’s region has no triangles at a timestep, the manifest still includes the entry with `triCount: 0`, `approxBytes: 0`, and `url: null`. This keeps IDs aligned without writing placeholder GLBs.
+5. **Caching semantics** – `actualBytes` is `0` for empty tiles; downstream consumers should treat `url: null` as “skip loading but leave the node alive”.
 
-### 1.3. `build_uv_quadtree`
+When `--static_octree` is absent, the legacy per-timestep behaviour remains: each GLB defines its own scene bounds and only existing tiles are written to the manifest.
 
-**Signature**: `build_uv_quadtree(src_glb, out_dir, extract="default", time_index=0, max_depth=5, target_bytes=200_000, split_meshes=False, preserve_borders=False, snap_radius=None, snap_ratio=None, write_tileset=False)`
-
-| Step | Details |
-| --- | --- |
-| 1. Mesh prep | Depending on `split_meshes`, call `load_glb_mesh_primitives` or flatten via `load_glb_arrays`. Each entry tracks name, positions, UVs, colours, and indices. |
-| 2. Stats | Compute global triangle stats (total count, average/min area) for manifest metadata. Filter out primitives with zero triangles. |
-| 3. Manifest stub | Initialise manifest header with `charts` = number of primitives. |
-| 4. Per-mesh tile loop | For each mesh: <br> • Precompute triangle areas (`tri_areas`) and UV centroids (`uv_centroids`). <br> • Iterate `z` from `max_depth` down to 0. For each (x, y) tile compute bounding box `b` = `uv_tile_bounds`. <br> • Build triangle mask (`uv_in_tile`) and create subset via `subset_trimesh`. <br> • If `preserve_borders`, capture boundary vertex positions (`compute_border_edges`). |
-| 5. Decimation & seams | • Run `decimate_to_target`. <br> • If `preserve_borders`, call `snap_decimated_border` with absolute (`snap_radius`) or relative (`snap_ratio * diag`) tolerance. <br> • Else, add skirts via `add_skirts` (10% of mean edge length). |
-| 6. Output | Write tile GLB under `mesh_<idx>/<z>/<x>/<y>.glb`. Record both `approxBytes` (estimate) and the real file size (`actualBytes`) in manifest entries. |
-| 7. Finalise manifest & stats | Sort tiles by `(mesh, z, x, y)` and write `manifest_<time>.json`. Afterwards `summarize_tile_sizes` prints min/mean/median/max, percentiles, and a KB histogram. `summarize_tile_sizes_by_depth` also reports per-depth stats and highlights the fraction of tiles under 25 KB so you can detect overly deep refinements. |
-
-### 1.4. `build_world_octree`
-
-Similar structure but partitions using world-space AABBs instead of UV quads. Key differences:
-
-* Use `child_bounds(scene_aabb, z, i, j, k)` to divide the global bounding box.
-* Triangle filtering uses `in_aabb` on world centroids.
-* UVs are optional; emitted GLBs may carry only positions/colours.
-
-### 1.5. CLI (`main`)
-
-* Builds the `argparse` parser with shared flags. Notable options now include `--tiling_space`, `--split_meshes`, `--preserve_borders`, `--snap_radius`, `--snap_ratio`, `--border_projection`, and `--uv_eps_ratio` (relative UV overlap margin per tile). Snapshot helpers `--snapshots` and `--input_dir` process sequential time steps, while `--in_glb` targets a single file. `--write_tileset` emits a companion 3D Tiles 1.1 `tileset.json` that references the generated GLB content via `3DTILES_content_gltf`, making the output consumable by CesiumJS and other Next-ready viewers. When that flag is set you can additionally use `--tileset-origin lat,lon[,height]` to position the tileset root in an ENU frame on Earth and `--tileset-scale` for a uniform scale at the root transform (both leave the per-tile GLBs untouched so the in-house viewer keeps working with the manifest).
-
-  Typical command for the oblique single-cylinder UV dataset:
-
-  ```bash
-  python3 build_tiles.py \
-    --in_glb examples/single_cylinder/single_cylinder.glb \
-    --tiling_space uv \
-    --out_dir tiles_out \
-    --extract single-cylinder-uv \
-    --max_depth 4 \
-    --target_kb 100 \
-    --preserve_borders \
-    --snap_ratio 0.001 \
-    --skip_leaf_decimation \
-    --min_ratio 0.002 \
-    --min_tris 8 \
-    --max_iter 6 \
-    --root_voxel_ratio 0.02 \
-    --root_voxel_trigger 4 \
-    --write_tileset \
-    --tileset-origin 52.2053,0.1218,0.0
-  ```
-
-  The command above mirrors the workflow used to generate the CesiumJS tileset during debugging; adjust `--tileset-origin` (and optionally `--tileset-scale`) for other geographic placements.
-* Normalises sizes (`target_bytes` = KB × 1024) and validates snap tolerances (`--snap_ratio`, `--snap_radius`). If `--preserve_borders` is enabled without an explicit tolerance the code falls back to a default `snap_ratio` of `1e-3`.
-* Dispatches to UV or world builder through an inner `process_single`. When `--snapshots` is set it sorts all `*.glb` files in the input directory, increments `time` per file, and invokes `process_single` for each. World-space tiling still rejects `--split_meshes`. The flag `--skip_leaf_decimation` skips `decimate_to_target` for tiles at `max_depth` so leaves retain the original geometry. Additional decimation knobs expose the reduction floor: `--min_ratio` (default 0.02), `--min_tris` (default 32), and `--max_iter` (default 6) let you tighten those limits. A root fallback (`--root_voxel_ratio` + `--root_voxel_trigger`) runs voxel clustering on z=0 tiles when the quadric decimator can’t hit the byte target, producing a lightweight preview without affecting deeper levels.
-* Prior to extracting arrays we bake any `baseColorTexture` images into per-vertex `COLOR_0` attributes (via Pillow + PyGLTFLib). That way world-space tiles carry colours even though we drop UVs/textures downstream.
-
----
-
-## 2. `server.mjs`
-
-Quick summary (mostly unchanged):
-
-* Serves static assets from `public/` and tiles from `tiles_out/` under `/tiles/*`.
-* Exposes `{extract, time}` manifests and `/api/extracts` listing detectible extracts.
-
----
-
-## 3. `public/viewer.js`
-
-### 3.1. Class Structure
-
-`TileManager` is the core orchestrator. Important members:
-
-* `loader` – `GLTFLoader` instance.
-* `byId`, `tiles`, `cache` – manifest lookup, active tiles, and cached tiles (LRU style, default cap 500 tiles / ~600 MB).
-* `queue`, `inflight` – track pending/active loads.
-* Diagnostics toggles: `wireframeMode`, `showBoundingBoxes`, `tileColorMode`, `simpleShadingMode`.
-* Lighting: ambient fill plus a directional light parented to the camera so the simple-shading option stays evenly lit as the user orbits.
-* `rootTileIds` – set of `tileId`s whose `parent` is `null`. Roots are kept in the cache (eviction skips them) so they can be reinstated quickly, but they are only visible when the LOD logic needs them as a fallback.
-* `_hasPendingDescendants(tileId, wantSet)` – helper used during LOD transitions to keep a parent visible while any wanted descendants are still loading.
-* `_tickLock`, `_tickPending` – ensure the async tick loop doesn’t overlap.
-* HUD wiring: `hudLOD`, `hudTiles`, `hudCache`, and `loadingIndicator` update the overlay counters/spinner each tick.
-* Threshold/budget globals: `SSE_THRESHOLD_REFINE`/`COARSEN`, `MAX_CONCURRENT`, `MAX_TILES`, `MAX_CACHE_BYTES` govern LOD, request concurrency, and cache eviction.
-
-### 3.2. Lifecycle
-
-#### `init(manifestUrl)`
-
-* Fetch manifest JSON, populate `byId`.
-* Enqueue root tiles (`z === 0`) via `_enqueue`.
-
-#### `_enqueue(tileId)`
-
-* If tile exists in `cache`, detach it from cache, attach to scene, update diagnostics, add to `tiles`, and return.
-* Otherwise push `tileId` into the queue if it’s not already present.
-
-#### `_load(tileId)`
-
-* Asynchronously load GLB with `GLTFLoader`. Each mesh gets:
-  - A fresh `MeshStandardMaterial` (keeps vertex colours) storing debug info for diagnostics.
-  - Cached vertex colour attributes so diagnostics can restore them later.
-* Consume any prefetched binary payload from `prefetchedTileBuffers` before falling back to `loader.loadAsync` (saves a round-trip when neighbour prefetch succeeds).
-* Create a `Box3Helper` for bounding boxes.
-* Construct `{ obj3d, meta, bboxHelper }` record, add to `tiles`, and call `_cacheInsert`.
-* Apply tile colour override if diagnostic is active.
-* returns the tile record.
-
-#### `_cacheInsert(tileId, record)`
-
-* Insert into `cache` and bump `cacheBytes`.
-* Evict oldest inactive entries while the cache exceeds `MAX_TILES` or `MAX_CACHE_BYTES`.
-  - The loop now scans keys until it finds one **not** present in `this.tiles`.
-  - Evicted mesh resources (geometry/material/helper) are disposed.
-
-#### `clear()`
-
-* Bumps `manifestVersion`, clears `rootTileIds`, detaches every active tile/helper from the scene, and traverses cached meshes to dispose GPU resources.
-* Empties `tiles`, `cache`, and `queue`, zeroes the tracked byte budget, and resets the manifest lookup.
-
-#### `_unload(tileId)`
-
-* Remove tile’s `obj3d` and helper from the scene.
-* Delete entry from `tiles` (record persists in `cache`).
-
-
-### 3.3. LOD Loop (`tick` / `_tickOnce`)
-
-1. **Prevent overlap**: `tick` sets `_tickLock` to true while `_tickOnce` runs. If another tick is requested, set `_tickPending` and rerun once current pass completes.
-
-2. **Frustum & SSE**: `_decide()` calculates which tiles are needed (`want`). It precomputes median geometric error per depth, normalises each tile's SSE (`sse * medianDepthGE / tile.geometricError`), and recurses into children when that scaled value exceeds `SSE_THRESHOLD_REFINE` so varying mesh density doesn't skip intermediate levels.
-
-3. **Visibility pre-pass**: Toggle visibility (and helper visibility) for all `this.tiles` based on membership in `want`. Parents that appear in `replaceParents` stay visible while their descendants are still downloading (`_hasPendingDescendants`).
-
-4. **Queue**: Enqueue missing tiles with their current `normalizedSse` as a priority; pending entries are sorted so higher-error (closer) tiles are requested first while still filtering duplicate/stale IDs.
-
-5. **Removal**: Call `_unload` for any active tile not in `want`. Parents remain visible while any of their wanted descendants are still loading (`_hasPendingDescendants`). Root tiles are always retained as a fallback.
-
-6. **Load burst**: While there are queued IDs and `inflight < MAX_CONCURRENT`, shift IDs into `_load`. After `Promise.all()` resolves, inspect each returned tile record:
-   * If tile is still wanted (or acting as a fallback) keep it visible and sync helper state.
-   * Otherwise, `_unload(id)` immediately to guard against late arrivals.
-
-7. **HUD update**: Update tile/cache counts, bounding boxes, and loading indicator via `_setLoadingIndicator(active)`.
-
-### 3.4. Diagnostics & GUI
-
-`dat.gui` initialises settings object:
-
-```js
-const settings = {
-  extract: 'default',
-  time: '0',
-  sseRefine: SSE_THRESHOLD_REFINE,
-  wireframe: false,
-  boundingBoxes: true,
-  tileColorMode: false,
-  simpleShading: true
-};
-```
-
-#### Controls
-
-* **Dataset folder** – repopulated from `/api/extracts`, dispatches manifest loads on change.
-* **LOD folder** – exposes `sseRefine` (0.1–120 px, default 18 px). Whenever the slider moves, `SSE_THRESHOLD_COARSEN` auto-updates to half of `sseRefine` and `tick()` reruns.
-* **Diagnostics** – toggles wireframe, bounding boxes (default on), simple shading (default on), and tile colours. Each handler updates active tiles immediately:
-  - Wireframe: sets `material.wireframe` for all meshes in `tiles` and `cache`.
-  - Bounding boxes: adds/removes helpers only for active tiles. `updateBoundingBoxVisibility` ensures cached helpers are detached.
-  - Tile colours: `_applyTileColor` swaps shading for active tiles using a per-mesh random HSL tint; `_restoreTileMaterial` returns to the stored material when turned off.
-  - Simple shading: `_applySimpleShading` switches meshes to a cached `MeshPhongMaterial` (respecting vertex colours) with elevated shininess/specular colour; turning it off restores or reapplies tile colours as needed.
-
-### 3.5. Extract Selection & Prefetching
-
-* `loadExtractsList` hits `/api/extracts`, caches the response, rebuilds the GUI controls, and triggers an initial manifest load. Errors fall back to the default extract/time pair.
-* `rebuildTimeController` chooses between a discrete dropdown (many timesteps) and a slider (<=100). The slider stores a numeric `timeIndex` so dat.gui can emit integers even though `settings.time` remains stringified for URL construction.
-* `schedulePrefetchNeighbours` determines adjacent timesteps (+/-1, +/-2) and calls `prefetchRootTiles`, which fetches the neighbour manifest and root tile GLBs ahead of time. Prefetched ArrayBuffers live in `prefetchedTileBuffers`, letting `_load` short circuit straight into `GLTFLoader.parse` without another HTTP transfer.
-* Diagnostics interplay: enabling tile colours or simple shading automatically disables the other mode and re-applies the relevant material override to all loaded tiles.
-* Deployment note: the server serves `manifest_<time>.json.gz` automatically when present (keep the plain `.json` alongside it so clients without gzip support still succeed).
-
----
-
-## 4. End-to-End Flow Example
-
-1. **Generate GLB** using `examples/cylinders/cylinders.py` (supports sinusoidal radius modulation via `--wave-amplitude`/`--wave-cycles-…`).
-2. **Tile** with `build_tiles.py` setting `--split_meshes` and `--preserve_borders`.
-3. **Serve** with `npm run dev` → open `http://localhost:8080`.
-4. Viewer loads `manifest`, spawns root tiles, then refines/coarsens as you orbit. Diagnostics highlight tiles and bounding boxes without doubling geometry.
-
----
-
-## 5. Troubleshooting Quick Reference
-
-| Issue | Cause | Mitigation |
+### 1.3 UV vs. World Key Differences
+| Aspect | UV Quadtree | World Octree |
 | --- | --- | --- |
-| Coarse/fine tiles overlap after zooming out | Late-arriving child tiles | `_load` returns record & immediate `_unload` if tile no longer in `want` (already implemented). |
-| Debug colours look washed out | Lighting interacting with materials | Latest build swaps to `MeshBasicMaterial` for diagnostics. |
-| Bounding boxes flash | Helpers removed when tile still active | `updateBoundingBoxVisibility` now ignores cached-but-active helpers. |
-| Cache HUD keeps growing | Eviction stops at first active entry | Loop now scans for oldest inactive entry before breaking. |
-| Cracks along seams | Skirts disabled without snapping | Use `--preserve_borders` (with `--snap_ratio` or `--snap_radius`) or keep skirts on. |
+| Partition | `uv_tile_bounds(z,x,y)` within [0,1] UV domain; optional `--split_meshes` per primitive | `child_bounds(scene_aabb,z,i,j,k)` within world AABB |
+| Triangle selection | `uv_in_tile` mask on UV centroids | `in_aabb` mask on world centroids |
+| Border handling | `preserve_borders` snaps UV seams; can project onto UV tile planes | `preserve_borders` reprojects to analytic cell planes or snaps with `snap_radius` |
+| Output path | `mesh_<idx>/<z>/<x>/<y>.glb` | `<z>/<x>/<y>/<k>.glb` |
+
+### 1.4 CLI Highlights
+```bash
+python3 build_tiles.py \
+  --snapshots --input_dir examples/multi-stage-comp/all_snapshots \
+  --tiling_space world \
+  --out_dir tiles_out \
+  --extract multi-stage-comp-unst \
+  --max_depth 4 \
+  --target_kb 300 \
+  --preserve_borders --snap_ratio 0.001 \
+  --skip_leaf_decimation --min_ratio 0.05 --min_tris 500 --max_iter 5 \
+  --root_voxel_ratio 0.02 \
+  --static_octree
+```
+Key flags:
+- `--snapshots` + `--input_dir` – batch process sorted GLBs; `--time` is used as an offset.
+- `--tiling_space` – world/uv selection.
+- `--static_octree` – world mode only; runs the global scan/logging, forces shared bounds, emits `layout.type`.
+- `--preserve_borders`, `--snap_radius`, `--snap_ratio`, `--border_projection` – seam integrity controls.
+- `--root_voxel_ratio` / `--root_voxel_trigger` – fallback voxel clustering when root tiles blow past target size.
+- `--write_tileset`, `--tileset-origin`, `--tileset-scale` – optional 3D Tiles output.
 
 ---
 
-For more context, the codebase has descriptive comments around the trickier areas (border snapping, cache management). Workflows are captured by the sample commands above.
+## 2. `public/viewer.js`
+
+### 2.1 Architecture Recap
+`TileManager` manages GLB streaming and scene graph nodes:
+- Maintains `tiles` (active) + `cache` (LRU) keyed by `tileId`.
+- Computes screen-space error (SSE) thresholds (`SSE_THRESHOLD_REFINE/COARSEN`) to decide which tiles stay loaded.
+- Applies diagnostics (wireframe, bounding boxes, tile colours) and overlays (wireframe overlay, simple shading).
+- HUD shows current thresholds, tile counts, and cache usage.
+
+### 2.2 Static Layout Reuse
+Static manifests (those declaring `layout.type = "static-octree"`) can skip the clear/reload cycle when the timestep changes:
+1. **Detection** – `mgr.init()` inspects `manifest.layout.type`. If it’s `static-octree`, `staticLayoutActive` becomes `true`. A Diagnostics toggle (`Static layout reuse`) lets developers disable reuse at runtime.
+2. **Time tracking** – each tile record now stores `timeIndex`. Cache entries carry the same field. `_tileMatchesTime()` ensures we only reuse meshes that reflect the target timestep.
+3. **Queue behaviour** – `_enqueue()` accepts `{timeIndex, forceReload}`. When the viewer already has a tile but at an old timestep, the entry is re-queued with `forceReload=true` instead of unloading the mesh.
+4. **Loading** – `_load()` consumes queue entries (rather than tile IDs alone) so it knows the desired timestep. If `url` is null, it synthesises an empty `THREE.Group` and just marks the tile as refreshed. Otherwise it loads and processes the GLB as before.
+5. **Swap install** – `_installTile()` replaces the previous mesh/bbox helper in-place, reapplies diagnostics, and inserts the record into both `tiles` and `cache`. Old meshes are disposed via `_disposeRecord`.
+6. **SSE refresh** – once every root tile reports `timeIndex === targetTimeIndex`, `staticRefreshPending` triggers another tick so SSE refinement/coarsening honours the new timestep immediately.
+7. **Fallback** – if the dataset changes (different extract or a missing tile), `loadManifest()` falls back to `mgr.clear()` and the legacy behaviour resumes automatically.
+
+Legacy datasets operate exactly as before: the scene clears, caches reset, and tiles reload per manifest.
+
+### 2.3 Diagnostics & Settings
+`settings` now includes `staticReuse` (default `true`). The Diagnostics GUI exposes a “Static layout reuse” checkbox that flips `mgr.staticReuseDisabled`. Other controls remain:
+- Wireframe & wireframe overlay toggles
+- Bounding boxes and axes helper
+- Tile colour / simple shading modes
+- SSE refine slider (with optional auto-calibration)
+
+When static reuse is enabled, the HUD never flashes blank while scrubbing time; the previous timestep stays visible until the new GLBs arrive.
+
+### 2.4 Time-Switch Flow Summary
+1. `loadManifest()` fetches JSON first, figures out whether reuse is safe (same extract, static layout, reuse toggle on).
+2. If reuse is disabled, it calls `mgr.clear()` as before. Otherwise it sets `staticRefreshPending=true`, records the target time, and calls `mgr.init()` with `reuseTiles=true` so root nodes stay attached.
+3. `_tickOnce()` keeps enqueuing tiles until each required `tileId` has data for the new timestep. Queue entries carry the desired time so stale GLBs are ignored.
+4. After all root tiles refresh, `_staticRootsAtTargetTime()` triggers another tick -> SSE refine -> final view matches the new timestep without a flash.
+
+---
+
+## 3. End-to-End Flow Example
+
+1. **Generate GLBs** – e.g. `examples/multi-stage-comp/convert_bunny.py` or your CFD snapshots.
+2. **Tile** – run `build_tiles.py` with `--tiling_space world --static_octree` so every manifest advertises `layout.type = "static-octree"`.
+3. **Serve** – `npm install` (once) then `npm run dev`; open `http://localhost:8080`.
+4. **View** – select your extract/time. Scrub between timesteps: the previous mesh persists while request queue refreshes tiles; once completed, SSE refines the new timestep.
+
+---
+
+## 4. Troubleshooting Quick Reference
+
+| Issue | Cause | Fix |
+| --- | --- | --- |
+| Static dataset still flashes blank | Manifest missing `layout.type = "static-octree"` or GUI toggle off | Regenerate tiles with `--static_octree`, ensure Diagnostics → Static layout reuse is enabled |
+| Tile never updates to new timestep | Entry stuck with `url: null` or network error logged | Check manifest `url` for that tile; rebuild or inspect server response |
+| Cache grows without bound | All entries active (static swap keeps them alive) | Increase `MAX_TILES`/`MAX_CACHE_BYTES` or lower `max_depth`/`target_kb` |
+| Bounding boxes disappear after reuse | Viewer toggles bounding boxes per tile install | Toggle “Bounding Boxes” off/on to reattach helpers if needed |
+| Static scan seems slow | `compute_global_world_bounds` logs every GLB | Normal; use smaller `--input_dir` during tests or run once and reuse the output |
+
+For deeper debugging, inspect `dev_notes/viewer-static-tiles-plan.md` (action plan for static swaps) and `dev_notes/aligned-tiles-plan.md` (builder requirements).

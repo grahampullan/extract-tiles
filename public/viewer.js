@@ -108,19 +108,38 @@ class TileManager {
     this.wireOverlayEnabled = false;
     this.wireOverlayAngle = 0;
     this.wireOverlayOpacity = 1.0;
+    this.datasetKey = null;
+    this.staticLayoutType = null;
+    this.staticLayoutActive = false;
+    this.staticReuseDisabled = false;
+    this.currentTimeIndex = null;
+    this.targetTimeIndex = null;
+    this.staticRefreshPending = false;
   }
 
-  async init(manifestUrl) {
+  _useStaticLayout() {
+    return !!this.staticLayoutActive && !this.staticReuseDisabled;
+  }
+
+  async init(manifestUrl, preloadedManifest = null, options = {}) {
     const version = ++this.manifestVersion;
     this.manifestUrl = manifestUrl;
     this.rootTileIds.clear();
+    const { datasetKey = null, timeIndex = null } = options;
     try {
-      const manifest = await (await fetch(manifestUrl)).json();
+      const manifest = preloadedManifest || await (await fetch(manifestUrl)).json();
       if (version !== this.manifestVersion) {
         return;
       }
       this.manifest = manifest;
+      this.datasetKey = datasetKey ?? this.datasetKey;
+      this.staticLayoutType = (manifest.layout && manifest.layout.type) || null;
+      this.staticLayoutActive = (this.staticLayoutType === "static-octree");
       this.tileBaseUrl = deduceTileBaseUrl(manifestUrl, manifest);
+      this.targetTimeIndex = timeIndex != null ? timeIndex : (manifest.time ?? null);
+      if (!this._useStaticLayout() || this.tiles.size === 0) {
+        this.currentTimeIndex = this.targetTimeIndex;
+      }
       this._computeLevelGeStats();
       for (const t of this.manifest.tiles) {
         this.byId.set(t.tileId, t);
@@ -131,7 +150,7 @@ class TileManager {
       // Load root tiles
       for (const t of this.manifest.tiles) {
         if (t.z === 0) {
-          this._enqueue(t.tileId);
+          this._enqueue(t.tileId, null, { forceReload: this._useStaticLayout() });
         }
       }
     } catch (err) {
@@ -204,6 +223,28 @@ class TileManager {
       overlay.geometry?.dispose();
       overlay.material?.dispose?.();
       mesh.userData.wireOverlay = null;
+    }
+  }
+
+  _disposeRecord(rec) {
+    if (!rec) return;
+    if (rec.obj3d) {
+      rec.obj3d.traverse(o => {
+        if (o.isMesh || o.isLine) {
+          o.geometry?.dispose();
+          if (o.material) {
+            if (o.material.map) o.material.map.dispose();
+            o.material.dispose?.();
+          }
+        }
+        if (o.userData?.wireOverlay) {
+          this._disposeWireOverlay(o);
+        }
+      });
+    }
+    if (rec.bboxHelper) {
+      rec.bboxHelper.geometry?.dispose();
+      rec.bboxHelper.material?.dispose?.();
     }
   }
 
@@ -383,14 +424,21 @@ class TileManager {
     // Queue tiles we need but don't have
     const rootIds = [...this.rootTileIds];
     for (const id of rootIds) {
-      if (want.has(id) && !this.tiles.has(id)) {
+      if (!want.has(id)) continue;
+      const rec = this.tiles.get(id);
+      if (!rec) {
         this._enqueue(id, this.requestPriority.get(id));
+      } else if (this._useStaticLayout() && this.targetTimeIndex != null && rec.timeIndex !== this.targetTimeIndex) {
+        this._enqueue(id, this.requestPriority.get(id), { forceReload: true });
       }
     }
     for (const id of want) {
       if (this.rootTileIds.has(id)) continue;
-      if (!this.tiles.has(id)) {
+      const rec = this.tiles.get(id);
+      if (!rec) {
         this._enqueue(id, this.requestPriority.get(id));
+      } else if (this._useStaticLayout() && this.targetTimeIndex != null && rec.timeIndex !== this.targetTimeIndex) {
+        this._enqueue(id, this.requestPriority.get(id), { forceReload: true });
       }
     }
 
@@ -416,27 +464,20 @@ class TileManager {
       launched = [];
       while (this.queue.length && this.inflight < MAX_CONCURRENT) {
         const nextEntry = this.queue.shift();
-        const nextId = nextEntry.id;
-        launched.push(this._load(nextId));
+        launched.push(this._load(nextEntry));
       }
       if (launched.length) {
         this._setLoadingIndicator(true);
         const loaded = await Promise.all(launched);
         if (versionAtStart !== this.manifestVersion) return;
         // Hide freshly loaded tiles that are no longer needed
-        for (const rec of loaded) {
-          if (!rec) continue;
+        for (const result of loaded) {
+          if (!result || !result.rec) continue;
+          const { rec, entry } = result;
           const id = rec.meta.tileId;
           const keepAsFallback = replaceParents.has(id) && this._hasPendingDescendants(id, want);
           const needed = want.has(id) || keepAsFallback;
-          if (!needed) {
-            this._unload(id);
-          } else {
-            rec.obj3d.visible = true;
-            if (rec.bboxHelper) {
-              rec.bboxHelper.visible = this.showBoundingBoxes;
-            }
-          }
+          this._installTile(rec, { needed });
         }
       }
     } while (this.queue.length && this.inflight < MAX_CONCURRENT);
@@ -448,6 +489,11 @@ class TileManager {
     if (versionAtStart !== this.manifestVersion) return;
 
     this._setLoadingIndicator(this.inflight > 0 || this.queue.length > 0);
+    if (this._useStaticLayout() && this.staticRefreshPending && this._staticRootsAtTargetTime()) {
+      this.staticRefreshPending = false;
+      this.currentTimeIndex = this.targetTimeIndex;
+      this._tickPending = true;
+    }
   }
 
   async tick() {
@@ -472,39 +518,71 @@ class TileManager {
     }
   }
 
-  _enqueue(id, priority = null) {
+  _tileMatchesTime(rec, desiredTime) {
+    if (!rec) return false;
+    if (!this._useStaticLayout()) return true;
+    if (desiredTime == null) return true;
+    return rec.timeIndex === desiredTime;
+  }
+
+  _staticRootsAtTargetTime() {
+    if (!this._useStaticLayout()) return false;
+    if (this.targetTimeIndex == null) return false;
+    for (const id of this.rootTileIds) {
+      const rec = this.tiles.get(id);
+      if (!rec) return false;
+      if (rec.timeIndex !== this.targetTimeIndex) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  _enqueue(id, priority = null, options = {}) {
     const priorityHint = (priority ?? this.requestPriority.get(id) ?? 0);
-    // Check cache first
+    const { forceReload = false, timeIndex = this.targetTimeIndex } = options;
+    const desiredTime = timeIndex != null ? timeIndex : this.targetTimeIndex;
+    const wantStatic = this._useStaticLayout();
+    const activeRec = this.tiles.get(id);
+    const recIsFresh = this._tileMatchesTime(activeRec, desiredTime);
+    let needsReload = forceReload || (wantStatic && activeRec && !recIsFresh);
+    if (activeRec && recIsFresh && !forceReload) {
+      return;
+    }
+    // Check cache for reusable record
     if (this.cache.has(id)) {
       const rec = this.cache.get(id);
-      this.cache.delete(id);
-      this.cache.set(id, rec); // Move to end (LRU)
-      this.scene.add(rec.obj3d);
-      if (rec.bboxHelper) {
-        if (this.showBoundingBoxes) {
-          if (rec.bboxHelper.parent !== this.scene) {
-            this.scene.add(rec.bboxHelper);
-          }
-          rec.bboxHelper.visible = true;
-        } else {
-          rec.bboxHelper.visible = false;
-          if (rec.bboxHelper.parent === this.scene) {
-            this.scene.remove(rec.bboxHelper);
+      const cacheFresh = this._tileMatchesTime(rec, desiredTime);
+      if (cacheFresh && !forceReload) {
+        this.cache.delete(id);
+        this.cache.set(id, rec); // Move to end (LRU)
+        this.scene.add(rec.obj3d);
+        if (rec.bboxHelper) {
+          if (this.showBoundingBoxes) {
+            if (rec.bboxHelper.parent !== this.scene) {
+              this.scene.add(rec.bboxHelper);
+            }
+            rec.bboxHelper.visible = true;
+          } else {
+            rec.bboxHelper.visible = false;
+            if (rec.bboxHelper.parent === this.scene) {
+              this.scene.remove(rec.bboxHelper);
+            }
           }
         }
+        this.tiles.set(id, rec);
+        if (this.tileColorMode) {
+          this._applyTileColor(rec);
+        } else if (this.simpleShadingMode) {
+          this._applySimpleShading(rec);
+        } else if (this.wireOverlayEnabled) {
+          this._applyOverlayBaseShading(rec);
+        } else {
+          this._restoreTileMaterial(rec);
+        }
+        this._setWireOverlayVisible(rec.obj3d, this.wireOverlayEnabled);
+        return;
       }
-      this.tiles.set(id, rec);
-      if (this.tileColorMode) {
-        this._applyTileColor(rec);
-      } else if (this.simpleShadingMode) {
-        this._applySimpleShading(rec);
-      } else if (this.wireOverlayEnabled) {
-        this._applyOverlayBaseShading(rec);
-      } else {
-        this._restoreTileMaterial(rec);
-      }
-      this._setWireOverlayVisible(rec.obj3d, this.wireOverlayEnabled);
-      return;
     }
 
     // Avoid duplicate queue entries
@@ -514,10 +592,20 @@ class TileManager {
         existing.priority = priorityHint;
         this._sortQueue();
       }
+      existing.forceReload = existing.forceReload || needsReload;
+      if (desiredTime != null) {
+        existing.timeIndex = desiredTime;
+      }
       return;
     }
 
-    this.queue.push({ id, priority: priorityHint, seq: this._queueSeq++ });
+    this.queue.push({
+      id,
+      priority: priorityHint,
+      seq: this._queueSeq++,
+      forceReload: needsReload,
+      timeIndex: desiredTime
+    });
     this._sortQueue();
   }
 
@@ -544,105 +632,90 @@ class TileManager {
     });
   }
 
-  async _load(id) {
+  async _load(entry) {
+    const { id, timeIndex } = entry;
     const meta = this.byId.get(id);
     if (!meta) return null;
 
     const tileUrl = resolveTileUrl(meta.url, this.tileBaseUrl);
-    if (!tileUrl) return null;
-
+    const desiredTime = timeIndex != null ? timeIndex : this.targetTimeIndex;
     const versionAtStart = this.manifestVersion;
     this.inflight++;
     let rec = null;
     try {
-      let glb;
-      const prefetched = prefetchedTileBuffers.get(tileUrl);
-      if (prefetched) {
-        prefetchedTileBuffers.delete(tileUrl);
-        glb = await new Promise((resolve, reject) => {
-          this.loader.parse(prefetched.slice(0), '', resolve, reject);
-        });
+      if (!tileUrl) {
+        const emptyGroup = new THREE.Group();
+        const bboxHelper = this._createBoundingBoxHelper(meta);
+        bboxHelper.userData.tileId = id;
+        rec = { obj3d: emptyGroup, meta, bboxHelper, timeIndex: desiredTime, empty: true };
       } else {
-        glb = await this.loader.loadAsync(tileUrl);
-      }
-      if (versionAtStart !== this.manifestVersion) {
-        glb.scene.traverse(o => {
-          if (o.isMesh) {
-            o.geometry?.dispose();
-            if (o.material) {
-              if (o.material.map) o.material.map.dispose();
-              o.material.dispose?.();
-            }
-          }
-        });
-        return null;
-      }
-      const obj = glb.scene;
-      obj.userData.tileId = id;
-
-      obj.traverse(o => {
-        if (o.isMesh && o.material) {
-          const newMaterial = new THREE.MeshStandardMaterial({
-            vertexColors: true,
-            transparent: false,
-            opacity: 1.0,
-            wireframe: this.wireframeMode,
-            side: THREE.DoubleSide
+        let glb;
+        const prefetched = prefetchedTileBuffers.get(tileUrl);
+        if (prefetched) {
+          prefetchedTileBuffers.delete(tileUrl);
+          glb = await new Promise((resolve, reject) => {
+            this.loader.parse(prefetched.slice(0), '', resolve, reject);
           });
+        } else {
+          glb = await this.loader.loadAsync(tileUrl);
+        }
+        if (versionAtStart !== this.manifestVersion) {
+          glb.scene.traverse(o => {
+            if (o.isMesh) {
+              o.geometry?.dispose();
+              if (o.material) {
+                if (o.material.map) o.material.map.dispose();
+                o.material.dispose?.();
+              }
+            }
+          });
+          return null;
+        }
+        const obj = glb.scene;
+        obj.userData.tileId = id;
 
-          if (o.material.map) {
-            newMaterial.map = o.material.map;
-          }
-
-          o.material = newMaterial;
-          o.userData.debugInfo = {
-            originalMaterial: newMaterial,
-            debugColor: pickDebugColor(),
-            originalColorAttr: o.geometry && o.geometry.attributes && o.geometry.attributes.color
-              ? o.geometry.attributes.color.clone()
-              : null,
-            overrideMaterial: null
-          };
-
-          if (!(o.geometry && o.geometry.attributes.color)) {
-            o.material = new THREE.MeshStandardMaterial({
-              color: pickDebugColor(),
-              vertexColors: false,
+        obj.traverse(o => {
+          if (o.isMesh && o.material) {
+            const newMaterial = new THREE.MeshStandardMaterial({
+              vertexColors: true,
               transparent: false,
               opacity: 1.0,
               wireframe: this.wireframeMode,
               side: THREE.DoubleSide
             });
-            o.userData.debugInfo.originalMaterial = o.material;
+
+            if (o.material.map) {
+              newMaterial.map = o.material.map;
+            }
+
+            o.material = newMaterial;
+            o.userData.debugInfo = {
+              originalMaterial: newMaterial,
+              debugColor: pickDebugColor(),
+              originalColorAttr: o.geometry && o.geometry.attributes && o.geometry.attributes.color
+                ? o.geometry.attributes.color.clone()
+                : null,
+              overrideMaterial: null
+            };
+
+            if (!(o.geometry && o.geometry.attributes.color)) {
+              o.material = new THREE.MeshStandardMaterial({
+                color: pickDebugColor(),
+                vertexColors: false,
+                transparent: false,
+                opacity: 1.0,
+                wireframe: this.wireframeMode,
+                side: THREE.DoubleSide
+              });
+              o.userData.debugInfo.originalMaterial = o.material;
+            }
           }
-        }
-      });
+        });
 
-      this.scene.add(obj);
-
-      const bboxHelper = this._createBoundingBoxHelper(meta);
-      bboxHelper.userData.tileId = id;
-      if (this.showBoundingBoxes) {
-        bboxHelper.visible = true;
-        this.scene.add(bboxHelper);
-      } else {
-        bboxHelper.visible = false;
+        const bboxHelper = this._createBoundingBoxHelper(meta);
+        bboxHelper.userData.tileId = id;
+        rec = { obj3d: obj, meta, bboxHelper, timeIndex: desiredTime };
       }
-
-      rec = { obj3d: obj, meta, bboxHelper };
-      this.tiles.set(id, rec);
-      this._cacheInsert(id, rec);
-
-      if (this.tileColorMode) {
-        this._applyTileColor(rec);
-      } else if (this.simpleShadingMode) {
-        this._applySimpleShading(rec);
-      } else if (this.wireOverlayEnabled) {
-        this._applyOverlayBaseShading(rec);
-      } else {
-        this._restoreTileMaterial(rec);
-      }
-      this._setWireOverlayVisible(obj, this.wireOverlayEnabled);
     } catch (e) {
       console.error("Tile load failed", id, e);
     } finally {
@@ -651,12 +724,12 @@ class TileManager {
 
     if (versionAtStart !== this.manifestVersion) {
       if (rec) {
-        this._unload(id);
+        this._disposeRecord(rec);
       }
       return null;
     }
 
-    return rec;
+    return { rec, entry };
   }
 
   _createBoundingBoxHelper(meta) {
@@ -673,6 +746,54 @@ class TileManager {
       helper.material.needsUpdate = true;
     }
     return helper;
+  }
+
+  _installTile(rec, options = {}) {
+    const id = rec.meta.tileId;
+    const needed = options.needed !== undefined ? options.needed : true;
+    const existing = this.tiles.get(id);
+    if (existing) {
+      this._cacheRemove(id);
+      this.scene.remove(existing.obj3d);
+      if (existing.bboxHelper) {
+        this.scene.remove(existing.bboxHelper);
+      }
+      this._disposeRecord(existing);
+      this.tiles.delete(id);
+    }
+
+    this.scene.add(rec.obj3d);
+    if (rec.bboxHelper) {
+      if (this.showBoundingBoxes) {
+        rec.bboxHelper.visible = true;
+        this.scene.add(rec.bboxHelper);
+      } else {
+        rec.bboxHelper.visible = false;
+      }
+    }
+
+    if (this.tileColorMode) {
+      this._applyTileColor(rec);
+    } else if (this.simpleShadingMode) {
+      this._applySimpleShading(rec);
+    } else if (this.wireOverlayEnabled) {
+      this._applyOverlayBaseShading(rec);
+    } else {
+      this._restoreTileMaterial(rec);
+    }
+    this._setWireOverlayVisible(rec.obj3d, this.wireOverlayEnabled);
+
+    this.tiles.set(id, rec);
+    this._cacheInsert(id, rec);
+
+    if (!needed) {
+      this._unload(id);
+    } else {
+      rec.obj3d.visible = true;
+      if (rec.bboxHelper) {
+        rec.bboxHelper.visible = this.showBoundingBoxes;
+      }
+    }
   }
 
   _unload(id) {
@@ -733,6 +854,14 @@ class TileManager {
       }
       this.cache.delete(evictCandidate);
     }
+  }
+
+  _cacheRemove(id) {
+    if (!this.cache.has(id)) return;
+    const rec = this.cache.get(id);
+    const bytes = (rec.meta && rec.meta.approxBytes) ? rec.meta.approxBytes : 0;
+    this.cache.delete(id);
+    this.cacheBytes = Math.max(0, this.cacheBytes - bytes);
   }
 
   _applyTileColor(rec) {
@@ -871,6 +1000,12 @@ class TileManager {
     this.manifestVersion += 1;
     this.rootTileIds.clear();
     this.levelGeMedian.clear();
+    this.staticLayoutType = null;
+    this.staticLayoutActive = false;
+    this.datasetKey = null;
+    this.currentTimeIndex = null;
+    this.targetTimeIndex = null;
+    this.staticRefreshPending = false;
     // Unload all tiles
     for (const [, rec] of this.tiles) {
       this.scene.remove(rec.obj3d);
@@ -1003,13 +1138,15 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     simpleShading: true,
     wireframeOverlay: false,
     wireframeOverlayOpacity: 1.0,
-    showAxes: false
+    showAxes: false,
+    staticReuse: true
   };
 
   mgr.showBoundingBoxes = settings.boundingBoxes;
   mgr.simpleShadingMode = settings.simpleShading;
   mgr.wireOverlayOpacity = settings.wireframeOverlayOpacity;
   mgr.applyWireOverlayState(settings.wireframeOverlay);
+  mgr.staticReuseDisabled = !settings.staticReuse;
   const axesHelper = new THREE.AxesHelper(0.5);
   axesHelper.visible = settings.showAxes;
   scene.add(axesHelper);
@@ -1283,6 +1420,14 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   async function loadManifest() {
     const manifestUrl = `/manifest/${settings.extract}/${settings.time}.json`;
     const extractChanged = currentExtract !== settings.extract;
+    let manifest = null;
+    try {
+      const response = await fetch(manifestUrl);
+      manifest = await response.json();
+    } catch (err) {
+      console.error('Failed to load manifest JSON:', err);
+      return;
+    }
     if (extractChanged) {
       currentExtract = settings.extract;
       hasLoadedDataset = false;
@@ -1299,10 +1444,23 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     mgr.showBoundingBoxes = settings.boundingBoxes;
     mgr.simpleShadingMode = settings.simpleShading;
     mgr.wireframeMode = settings.wireframe;
-    mgr.clear();
+    const manifestLayout = manifest?.layout?.type || null;
+    const datasetKey = settings.extract;
+    const manifestTime = manifest?.time != null ? manifest.time : settings.time;
+    const wantsStatic = (manifestLayout === "static-octree");
+    const canReuse = wantsStatic && !mgr.staticReuseDisabled && mgr.staticLayoutActive && mgr.datasetKey === datasetKey && mgr.tiles.size > 0;
+    if (!canReuse) {
+      mgr.clear();
+    } else {
+      mgr.staticRefreshPending = true;
+    }
     SSE_THRESHOLD_REFINE = 1e6;
     SSE_THRESHOLD_COARSEN = 5e5;
-    await mgr.init(manifestUrl);
+    await mgr.init(manifestUrl, manifest, {
+      datasetKey,
+      timeIndex: manifestTime,
+      reuseTiles: canReuse
+    });
     if (!settings.preserveCameraView || !hasLoadedDataset) {
       recenterCamera();
     }
@@ -1387,6 +1545,11 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
   diagnosticsFolder.add(settings, 'showAxes').name('Axes helper').onChange((value) => {
     settings.showAxes = value;
     axesHelper.visible = value;
+  });
+
+  diagnosticsFolder.add(settings, 'staticReuse').name('Static layout reuse').onChange((value) => {
+    settings.staticReuse = value;
+    mgr.staticReuseDisabled = !value;
   });
 
   tileColorController = diagnosticsFolder.add(settings, 'tileColorMode').name('Tile Colours').onChange((value) => {
