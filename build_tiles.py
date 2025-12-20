@@ -32,6 +32,15 @@ MAX_DEPTH         = 5
 # Debug toggles
 DEBUG_SCENE_GRAPH = False
 
+# Payload extraction (static octree)
+PAYLOAD_STRUCTURAL_KEYS = {
+    "tileId", "z", "x", "y", "k",
+    "parent", "children",
+    "aabbWorld", "aabbUV",
+    "mesh", "meshName"
+}
+PAYLOAD_FLOAT_FIELDS = {"avgTriArea", "minTriArea", "geometricError"}
+
 # ============================================================================
 # Shared Utilities
 # ============================================================================
@@ -1616,11 +1625,49 @@ def build_world_octree(src_glb, out_dir, extract="default", time_index=0,
         )
         print(f"Wrote 3D Tiles tileset to {tileset_path}")
 
-    print(f"Generated {len(tiles_meta)} world-octree tiles")
-    size_only = [size for (_, size) in depth_size_samples]
-    summarize_tile_sizes(size_only, heading=f"Tile sizes for '{extract}' (world)")
-    summarize_tile_sizes_by_depth(depth_size_samples, heading="  Depth breakdown")
-    summarize_decimation(depth_decimation_samples, heading="  Retained triangle ratios")
+  if layout_type == "static-octree":
+    payload = build_static_payload(manifest, os.path.basename(man_path))
+        payload_path = os.path.join(out_dir, extract, f"payload_{time_index}.json")
+        with open(payload_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"Wrote static payload to {payload_path}")
+
+  print(f"Generated {len(tiles_meta)} world-octree tiles")
+  size_only = [size for (_, size) in depth_size_samples]
+  summarize_tile_sizes(size_only, heading=f"Tile sizes for '{extract}' (world)")
+  summarize_tile_sizes_by_depth(depth_size_samples, heading="  Depth breakdown")
+  summarize_decimation(depth_decimation_samples, heading="  Retained triangle ratios")
+
+
+def build_static_payload(manifest, base_manifest_name):
+  tiles = manifest.get("tiles") or []
+  observed = set()
+  for tile in tiles:
+    for key in tile.keys():
+      if key not in PAYLOAD_STRUCTURAL_KEYS:
+        observed.add(key)
+  ordered_fields = ["tileId"] + sorted(observed - {"tileId"})
+
+  payload_rows = []
+  for tile in tiles:
+    row = []
+    for field in ordered_fields:
+      if field == "tileId":
+        row.append(tile.get("tileId"))
+        continue
+      value = tile.get(field)
+      if field in PAYLOAD_FLOAT_FIELDS and isinstance(value, (int, float)):
+        value = float(f"{value:.4e}")
+      row.append(value)
+    payload_rows.append(row)
+
+  return {
+    "extract": manifest.get("extract"),
+    "time": manifest.get("time"),
+    "baseManifest": base_manifest_name,
+    "fields": ordered_fields,
+    "tiles": payload_rows
+  }
 
 # ============================================================================
 # Crack Prevention: Skirts & Border Snapping
