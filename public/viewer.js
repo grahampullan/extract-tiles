@@ -130,7 +130,11 @@ class TileManager {
     this.rootTileIds.clear();
     const { datasetKey = null, timeIndex = null } = options;
     try {
-      const manifest = preloadedManifest || await (await fetch(manifestUrl)).json();
+      let manifest = preloadedManifest;
+      if (!manifest) {
+        const response = await fetch(manifestUrl);
+        manifest = await response.json();
+      }
       if (version !== this.manifestVersion) {
         return;
       }
@@ -823,6 +827,39 @@ class TileManager {
     }
   }
 
+  applyStaticPayload(payload) {
+    if (!payload || !Array.isArray(payload.fields) || !Array.isArray(payload.tiles)) {
+      return false;
+    }
+    if (!this.manifest || !Array.isArray(this.manifest.tiles)) {
+      return false;
+    }
+    const fields = payload.fields;
+    if (!fields.length || fields[0] !== "tileId") {
+      console.warn("Payload fields must start with tileId");
+      return false;
+    }
+    const tileIndex = new Map();
+    for (const tile of this.manifest.tiles) {
+      if (tile?.tileId != null) {
+        tileIndex.set(tile.tileId, tile);
+      }
+    }
+    for (const row of payload.tiles) {
+      if (!Array.isArray(row) || row.length < 1) continue;
+      const tileId = row[0];
+      const meta = tileIndex.get(tileId);
+      if (!meta) continue;
+      for (let i = 1; i < fields.length && i < row.length; i++) {
+        meta[fields[i]] = row[i];
+      }
+    }
+    if (typeof payload.time === "number") {
+      this.manifest.time = payload.time;
+    }
+    return true;
+  }
+
   _unload(id) {
     const rec = this.tiles.get(id);
     if (!rec) return;
@@ -1071,52 +1108,18 @@ class TileManager {
 }
 
 const prefetchedTileBuffers = new Map();
-const prefetchInFlight = new Set();
-
-async function prefetchRootTiles(extract, time) {
-  const key = `${extract}:${time}`;
-  if (prefetchInFlight.has(key)) return;
-  prefetchInFlight.add(key);
+async function fetchPayloadJson(url) {
   try {
-    const manifestUrl = `/manifest/${extract}/${time}.json`;
-    const resp = await fetch(manifestUrl);
-    if (!resp.ok) return;
-    const manifest = await resp.json();
-    const tileBaseUrl = deduceTileBaseUrl(manifestUrl, manifest);
-    const roots = (manifest.tiles || []).filter(t => t.z === 0);
-    await Promise.all(roots.map(async (tile) => {
-      const resolvedUrl = resolveTileUrl(tile.url, tileBaseUrl);
-      if (!resolvedUrl || prefetchedTileBuffers.has(resolvedUrl)) return;
-      try {
-        const res = await fetch(resolvedUrl);
-        if (!res.ok) return;
-        const buffer = await res.arrayBuffer();
-        prefetchedTileBuffers.set(resolvedUrl, buffer);
-      } catch (err) {
-        console.warn('Prefetch tile failed', tile.url, err);
-      }
-    }));
-  } catch (err) {
-    console.warn('Prefetch manifest failed', extract, time, err);
-  } finally {
-    prefetchInFlight.delete(key);
-  }
-}
-
-function schedulePrefetchNeighbours(settings, extractsCache) {
-  const selected = extractsCache.find(e => e.name === settings.extract);
-  if (!selected || !selected.times || !selected.times.length) return;
-  const times = selected.times.slice().sort((a, b) => a - b);
-  const current = Number(settings.time);
-  const offsets = [1, 2, -1, -2];
-  for (const offset of offsets) {
-    const target = current + offset;
-    if (times.includes(target)) {
-      prefetchRootTiles(settings.extract, target);
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`payload fetch failed: ${response.status}`);
     }
+    return await response.json();
+  } catch (err) {
+    console.warn("Failed to load payload", url, err);
+    return null;
   }
 }
-
 // Main application
 (async function main() {
   // Setup renderer
@@ -1444,16 +1447,35 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
 
   async function loadManifest() {
     const manifestUrl = `/manifest/${settings.extract}/${settings.time}.json`;
+    const payloadUrl = `/payload/${settings.extract}/${settings.time}.json`;
     const extractChanged = currentExtract !== settings.extract;
     prefetchedTileBuffers.clear();
-    prefetchInFlight.clear();
     let manifest = null;
-    try {
-      const response = await fetch(manifestUrl);
-      manifest = await response.json();
-    } catch (err) {
-      console.error('Failed to load manifest JSON:', err);
-      return;
+    const datasetKey = settings.extract;
+    const canUsePayload = !extractChanged
+      && !mgr.staticReuseDisabled
+      && mgr.staticLayoutActive
+      && mgr.datasetKey === datasetKey
+      && mgr.manifest
+      && mgr.manifest.layout?.type === "static-octree";
+
+    if (canUsePayload) {
+      const payload = await fetchPayloadJson(payloadUrl);
+      if (payload && mgr.applyStaticPayload(payload)) {
+        manifest = mgr.manifest;
+      } else {
+        console.warn("Failed to apply payload; falling back to full manifest");
+      }
+    }
+
+    if (!manifest) {
+      try {
+        const response = await fetch(manifestUrl);
+        manifest = await response.json();
+      } catch (err) {
+        console.error('Failed to load manifest JSON:', err);
+        return;
+      }
     }
     if (extractChanged) {
       currentExtract = settings.extract;
@@ -1472,7 +1494,6 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     mgr.simpleShadingMode = settings.simpleShading;
     mgr.wireframeMode = settings.wireframe;
     const manifestLayout = manifest?.layout?.type || null;
-    const datasetKey = settings.extract;
     const manifestTime = manifest?.time != null ? manifest.time : settings.time;
     const wantsStatic = (manifestLayout === "static-octree");
     const canReuse = wantsStatic && !mgr.staticReuseDisabled && mgr.staticLayoutActive && mgr.datasetKey === datasetKey && mgr.tiles.size > 0;
@@ -1522,7 +1543,6 @@ function schedulePrefetchNeighbours(settings, extractsCache) {
     if (settings.simpleShading) {
       applySimpleShadingState(true);
     }
-    schedulePrefetchNeighbours(settings, extractsCache);
     currentManifestKey = `${settings.extract}:${settings.time}`;
   }
 
