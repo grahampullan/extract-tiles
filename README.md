@@ -1,6 +1,10 @@
 # Extract-Tiles
 
-A multi-resolution tiling system for visualizing large triangulated mesh surfaces from CFD simulations. This implementation follows the concepts from Graham Pullan's AIAA paper on visualization of aerospace simulations using a navigation approach.
+A multi-resolution tiling system for visualizing large triangulated mesh surfaces from CFD simulations.
+
+The two core entry points are:
+- `build_tiles.py` – Python preprocessor that turns GLB meshes into manifests + multi-resolution GLB tiles.
+- `public/viewer.js` – Three.js client that streams manifests/tiles, performs LOD selection, and exposes the diagnostics HUD.
 
 ## Features
 
@@ -13,6 +17,8 @@ A multi-resolution tiling system for visualizing large triangulated mesh surface
 - **Time-series aware**: Discovers available extracts/timesteps, prefetches neighbouring manifests/tiles, and auto-picks a slider or dropdown based on timestep count.
 - **HUD & diagnostics**: Live overlay for SSE thresholds/tile counts/cache size, wireframe toggle, per-tile bounding boxes, tile-colour debug mode, and a camera-aligned Phong shading option with specular highlights.
 - **Efficient streaming**: Fastify server with compression and caching.
+- **Static-octree payloads**: World-space tiler can emit deterministic static layouts plus flattened payloads for lightweight viewers or offline workflows.
+- **3D Tiles export**: Optional Cesium-compatible `tileset.json` generation using the `3DTILES_content_gltf` extension referencing the GLB tiles.
 - **Interactive viewers**:
   - Single-extract viewer with dat.GUI controls for dataset/time selection, LOD tuning, diagnostics, and HUD indicators.
   - Multi-extract viewer for comparing multiple datasets.
@@ -71,6 +77,44 @@ python3 build_tiles.py \
   --target_kb 200
 ```
 
+#### Static world-octree payloads
+
+For world-space tiling you can request a deterministic static octree layout (the full octree is fixed in space for all snapshots) plus a flattened payload JSON used by lightweight viewers. Add `--static_octree` to any world-tiling command:
+
+```bash
+python3 build_tiles.py \
+  --in_glb path/to/isosurface.glb \
+  --out_dir tiles_out \
+  --extract isosurface \
+  --tiling_space world \
+  --max_depth 5 \
+  --target_kb 200 \
+  --static_octree
+```
+
+This writes the usual manifest/tiles plus `payload_<time>.json` describing the ordered field list and per-tile metadata compatible with the static viewer flow.
+
+Example command we use for an unsteady world-space dataset (snapshots not in this repo, but illustrates the full flag set):
+
+```bash
+python3 build_tiles.py \
+  --snapshots \
+  --input_dir examples/multi-stage-comp/all_snapshots \
+  --tiling_space world \
+  --out_dir tiles_out \
+  --extract multi-stage-comp-unst-static-octree-tmp \
+  --max_depth 4 \
+  --target_kb 300 \
+  --preserve_borders \
+  --snap_ratio 0.001 \
+  --skip_leaf_decimation \
+  --min_ratio 0.05 \
+  --min_tris 500 \
+  --max_iter 5 \
+  --root_voxel_ratio 0.02 \
+  --static_octree
+```
+
 ### Parameters:
 - `--in_glb`: Input GLB file path
 - `--out_dir`: Output directory for tiles (default: tiles_out)
@@ -83,6 +127,7 @@ python3 build_tiles.py \
 - `--preserve_borders`: Snap simplified tile boundaries back to their original vertex positions and skip skirt geometry (helps on closed seams)
 - `--snap_radius`: Absolute world-space snapping tolerance (used with `--preserve_borders`)
 - `--snap_ratio`: Relative snapping tolerance expressed as a fraction of the tile’s bounding-box diagonal (default 1e-3, set to 0 to disable when using `--snap_radius` instead)
+- `--world_eps_ratio`: Override the world-space overlap margin per tile (default 0.01). Increase when you need thicker skirts around world tiles.
 - `--uv_eps_ratio`: Override the *relative* UV overlap margin per tile (default 0.01 = 1% of each tile’s span)
 - `--border_projection`: When used with `--preserve_borders` (world tiler), project boundary vertices to the analytic cell planes instead of snapping to nearest original seam points.
 - `--input_dir` + `--snapshots`: Treat every `.glb` in a directory as a successive time step (use with `--time` to set the starting index)
@@ -92,6 +137,7 @@ python3 build_tiles.py \
 - `--max_iter`: Maximum number of decimation iterations per tile (default 6)
 - `--root_voxel_ratio`: (optional) fraction of the root tile bounding-box diagonal to use for voxel clustering fallback when decimation cannot hit the byte target
 - `--root_voxel_trigger`: Multiple of the byte target that triggers the voxel clustering fallback (default 4x)
+- `--static_octree`: Enable deterministic static world-space layouts that emit placeholder tiles at every node plus a flattened payload (pairs with `--tiling_space world`)
 - `--write_tileset`: Emit a 3D Tiles 1.1 `tileset_<time>.json` alongside the manifest (uses the `3DTILES_content_gltf` extension to point at the existing GLB tiles)
 - `--tileset-origin`: When used with `--write_tileset`, place the tileset root in an ENU frame centred on the supplied WGS84 `lat,lon[,height]`
 - `--tileset-scale`: Optional uniform scale factor applied at the tileset root (default 1.0)
@@ -122,32 +168,6 @@ python3 build_tiles.py \
 ```
 
 Those switches keep the deepest tiles at full fidelity, aggressively snap borders, and emit both the manifest and a 3D Tiles tileset. Drop the flags you don’t need or tweak the depth/target size to suit your dataset.
-
-#### Example: UV tiles ready for the CesiumJS viewer
-
-To reproduce the oblique-cylinder dataset (with border preservation, tuned decimation knobs, and a tileset placed over Cambridge, UK) run:
-
-```bash
-python3 build_tiles.py \
-  --in_glb examples/single_cylinder/single_cylinder.glb \
-  --tiling_space uv \
-  --out_dir tiles_out \
-  --extract single-cylinder-uv \
-  --max_depth 4 \
-  --target_kb 100 \
-  --preserve_borders \
-  --snap_ratio 0.001 \
-  --skip_leaf_decimation \
-  --min_ratio 0.002 \
-  --min_tris 8 \
-  --max_iter 6 \
-  --root_voxel_ratio 0.02 \
-  --root_voxel_trigger 4 \
-  --write_tileset \
-  --tileset-origin 52.2053,0.1218,0.0
-```
-
-The `--write_tileset` flag emits a 3D Tiles 1.1 `tileset_<time>.json` alongside the manifest and points at the generated GLB tiles via the `3DTILES_content_gltf` extension. `--tileset-origin` positions the tileset in an ENU frame centred on the supplied WGS84 latitude/longitude (height is optional, metres). Use `--tileset-scale <factor>` if you need a uniform scale baked into that root transform.
 
 ### Unsteady datasets
 
@@ -210,7 +230,7 @@ extract-tiles/
 
 ## Manifest Format
 
-Each extract generates a manifest JSON file with metadata:
+Each extract generates a manifest JSON file with metadata (see `tiles_out/multi-stage-comp-unst-static-octree/manifest_0.json` for a full example):
 
 ```json
 {
@@ -234,13 +254,14 @@ If you have large manifests, you can precompress them with `gzip -k manifest_<ti
 
 ## Tile Metadata
 
-Each GLB tile includes metadata in `mesh.extras`:
+Each GLB tile includes metadata in `mesh.extras`: 
 
 ```json
 {
   "tileId": "z/x/y",
   "z": 3, "x": 5, "y": 6,
-  "parent": "2/2/3",
+  "k": 2,
+  "parent": "2/2/3/1",
   "children": ["4/10/12", "4/11/12", "4/10/13", "4/11/13"],
   "aabbWorld": [[xmin,ymin,zmin], [xmax,ymax,zmax]],
   "aabbUV": [[u0,v0], [u1,v1]],
@@ -250,6 +271,27 @@ Each GLB tile includes metadata in `mesh.extras`:
   "time": 0
 }
 ```
+
+`k` encodes the octant index for world-space octrees (0-7) and stays 0 for UV quadtrees. When `--static_octree` is enabled every node is emitted (even empty leaves) so `children` may include placeholders even when `triCount` is zero.
+
+## Static Payload Format (`--static_octree`)
+
+When `--static_octree` is used the tiler also emits `payload_<time>.json`. This is a flattened table of selected tile fields for lightweight viewers:
+
+```json
+{
+  "extract": "name",
+  "time": 0,
+  "baseManifest": "manifest_0.json",
+  "fields": ["tileId", "actualBytes", "approxBytes", ...],
+  "tiles": [
+    ["0/0/0/0", 883232, 865968, 5.27e-7, ...],
+    ["1/0/0/0", 288404, 347556, 5.27e-7, ...]
+  ]
+}
+```
+
+`fields` defines the column order, and each entry under `tiles` is a row matching that order (always starting with `tileId`). The payload doesn't duplicate geometry; it just mirrors manifest metadata for consumers that want deterministic tree layouts without walking the full manifest.
 
 ## Viewer Controls
 
@@ -309,26 +351,6 @@ npm start
 - `examples/cylinders/cylinders.py`: builds spokes of open cylinders (multiple meshes) between hub and tip radii; supports stacking multiple wheels along the Z-axis and optional sinusoidal radius modulation per cylinder.
 - `examples/cylinders_unsteady/cylinders_unsteady.py`: produces a time series of rotating cylinder spokes suitable for testing unsteady tiling.
 
-## Troubleshooting
-
-### "UV mode requires TEXCOORD_0" error
-- Your GLB file doesn't have UV coordinates
-- Use `--tiling_space world` instead
-
-### Tiles not loading
-- Check browser console for errors
-- Ensure server is running
-- Verify manifest path is correct
-
-### Poor performance
-- Reduce `--max_depth` for fewer tiles
-- Increase `--target_kb` for larger tiles
-- Adjust SSE thresholds in viewer
-
 ## License
 
 MIT
-
-## Credits
-
-Based on concepts from "Visualisation of aerospace simulations - a navigation approach" by Graham Pullan, AIAA 2026.

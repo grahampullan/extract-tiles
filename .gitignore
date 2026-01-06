@@ -7,3 +7,6 @@
 /examples/**/*.gltf
 /examples/**/*.bin
 examples/dns*/
+examples/multi-stage-comp/
+examples/stanford_bunny/
+examples/stanford_bunny_original/
