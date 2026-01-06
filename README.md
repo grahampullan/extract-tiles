@@ -200,6 +200,33 @@ npm run dev
 
 The server will start on http://localhost:8080
 
+### Alternate: Static Viewer With Config
+
+If you want to host the viewer from a plain static server (no Fastify, no `/api/extracts`), drop a `viewer-config.json` alongside `public/index.html` describing the datasets you want to expose:
+
+```json
+{
+  "datasets": [
+    {
+      "name": "cylinders_world_2",
+      "label": "Multi-stage cylinders",
+      "times": [0, 1, 2],
+      "defaultTime": 0,
+      "tilesBasePath": "/no_api_test/cylinders_world_2/",
+      "manifests": [
+        { "time": 0, "manifest": "/no_api_test/cylinders_world_2/manifest_0.json" },
+        { "time": 1, "manifest": "/no_api_test/cylinders_world_2/manifest_1.json" },
+        { "time": 2, "manifest": "/no_api_test/cylinders_world_2/manifest_2.json" }
+      ]
+    }
+  ],
+  "defaultExtract": "cylinders_world_2",
+  "defaultTime": 0
+}
+```
+
+Then update `public/index.html` to fetch that config on startup (see inline comments in the file). In this mode the viewer never calls `/api/extracts`—it just loads the manifests/payloads referenced in the config and points tiles at the static `tilesBasePath`.
+
 ### 3. View the Tiles
 
 - **Single-extract viewer**: http://localhost:8080/
