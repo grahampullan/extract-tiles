@@ -49,11 +49,33 @@
 <body>
   <div id="app"></div>
   <div id="hud">
-    LOD: <span id="lod">-</span> |
     Tiles: <span id="tiles">0</span> |
     Cache: <span id="cache">0</span>
   </div>
   <div id="loading">Loading tiles...</div>
-  <script type="module" src="./viewer.js"></script>
+  <script type="module">
+    import initViewer from "./viewer.js";
+
+    // Config-driven bootstrap example:
+    // async function bootstrap() {
+    //   let config = null;
+    //   try {
+    //     const response = await fetch("./no_api_test/viewer-config.json", { cache: "no-store" });
+    //     if (response.ok) {
+    //       config = await response.json();
+    //     }
+    //   } catch (err) {
+    //     console.warn("viewer-config.json not found (falling back to API)", err);
+    //   }
+    //   await initViewer(config || undefined);
+    // }
+    // bootstrap().catch((err) => {
+    //   console.error("Failed to initialize viewer", err);
+    // });
+
+    initViewer().catch((err) => {
+      console.error("Failed to initialize viewer", err);
+    });
+  </script>
 </body>
 </html>

@@ -73,6 +73,78 @@ function resolveTileUrl(rawUrl, tileBaseUrl) {
   }
 }
 
+function resolveAbsoluteUrl(pathOrUrl) {
+  if (typeof pathOrUrl !== "string" || !pathOrUrl.length) {
+    return null;
+  }
+  try {
+    return new URL(pathOrUrl, window.location.href).href;
+  } catch (err) {
+    console.warn("Failed to resolve absolute URL", pathOrUrl, err);
+    return pathOrUrl;
+  }
+}
+
+function ensureTrailingSlash(url) {
+  if (typeof url !== "string" || !url.length) {
+    return url;
+  }
+  return url.endsWith("/") ? url : `${url}/`;
+}
+
+function formatPattern(pattern, extract, time) {
+  return pattern
+    .replace(/\{extract\}/g, extract)
+    .replace(/\{time\}/g, String(time));
+}
+
+function normalizeConfigDatasets(rawDatasets) {
+  if (!Array.isArray(rawDatasets) || rawDatasets.length === 0) {
+    return null;
+  }
+  const normalized = [];
+  for (const entry of rawDatasets) {
+    if (!entry || typeof entry.name !== "string" || !entry.name.length) continue;
+    const manifestEntries = new Map();
+    if (Array.isArray(entry.manifests)) {
+      for (const descriptor of entry.manifests) {
+        if (!descriptor) continue;
+        const time = Number(descriptor.time);
+        if (!Number.isFinite(time)) continue;
+        manifestEntries.set(time, {
+          manifestUrl: descriptor.manifest ? resolveAbsoluteUrl(descriptor.manifest) : null,
+          payloadUrl: descriptor.payload ? resolveAbsoluteUrl(descriptor.payload) : null,
+        });
+      }
+    }
+    const timesSet = new Set();
+    if (Array.isArray(entry.times)) {
+      for (const t of entry.times) {
+        const n = Number(t);
+        if (Number.isFinite(n)) timesSet.add(n);
+      }
+    }
+    for (const t of manifestEntries.keys()) {
+      timesSet.add(t);
+    }
+    const times = Array.from(timesSet).filter((t) => Number.isFinite(t)).sort((a, b) => a - b);
+    const defaultTime = Number.isFinite(entry.defaultTime) ? Number(entry.defaultTime) : (times[0] ?? 0);
+    normalized.push({
+      name: entry.name,
+      label: entry.label || entry.name,
+      times: times.length ? times : [defaultTime],
+      defaultTime,
+      manifestPattern: typeof entry.manifestPattern === "string" ? entry.manifestPattern : null,
+      payloadPattern: typeof entry.payloadPattern === "string" ? entry.payloadPattern : null,
+      tilesBasePath: typeof entry.tilesBasePath === "string"
+        ? ensureTrailingSlash(resolveAbsoluteUrl(entry.tilesBasePath))
+        : null,
+      manifestEntries,
+    });
+  }
+  return normalized.length ? normalized : null;
+}
+
 class TileManager {
   constructor(scene, camera, renderer) {
     this.scene = scene;
@@ -88,14 +160,13 @@ class TileManager {
     this.inflight = 0;
     this.frustum = new THREE.Frustum();
     this.projScreenMatrix = new THREE.Matrix4();
-    this.hudLOD = document.getElementById("lod") || { textContent: "" };
     this.hudTiles = document.getElementById("tiles") || { textContent: "" };
     this.hudCache = document.getElementById("cache") || { textContent: "" };
     this.loadingIndicator = document.getElementById("loading");
     this.wireframeMode = false; // Track wireframe state
     this.showBoundingBoxes = false; // Diagnostic overlay toggle
     this.tileColorMode = false; // Diagnostic colouring toggle
-    this.simpleShadingMode = false; // Optional lambert shading toggle
+    this.displayMode = "shaded";
     this.levelGeMedian = new Map(); // Depth -> geometric error median
     this.requestPriority = new Map(); // TileId -> SSE-based priority
     this.rootTileIds = new Set();
@@ -128,7 +199,7 @@ class TileManager {
     const version = ++this.manifestVersion;
     this.manifestUrl = manifestUrl;
     this.rootTileIds.clear();
-    const { datasetKey = null, timeIndex = null } = options;
+    const { datasetKey = null, timeIndex = null, tileBaseOverride = null } = options;
     try {
       let manifest = preloadedManifest;
       if (!manifest) {
@@ -142,7 +213,8 @@ class TileManager {
       this.datasetKey = datasetKey ?? this.datasetKey;
       this.staticLayoutType = (manifest.layout && manifest.layout.type) || null;
       this.staticLayoutActive = (this.staticLayoutType === "static-octree");
-      this.tileBaseUrl = deduceTileBaseUrl(manifestUrl, manifest);
+      const resolvedBase = tileBaseOverride ?? deduceTileBaseUrl(manifestUrl, manifest);
+      this.tileBaseUrl = resolvedBase;
       this.targetTimeIndex = timeIndex != null ? timeIndex : (manifest.time ?? null);
       if (!this._useStaticLayout() || this.tiles.size === 0) {
         this.currentTimeIndex = this.targetTimeIndex;
@@ -326,24 +398,10 @@ class TileManager {
     this.wireOverlayEnabled = value;
     for (const [, rec] of this.tiles) {
       this._setWireOverlayVisible(rec.obj3d, value);
-      if (!this.tileColorMode && !this.simpleShadingMode) {
-        if (value) {
-          this._applyOverlayBaseShading(rec);
-        } else {
-          this._restoreTileMaterial(rec);
-        }
-      }
     }
     for (const [id, rec] of this.cache) {
       if (this.tiles.has(id)) continue;
       this._setWireOverlayVisible(rec.obj3d, value);
-      if (!this.tileColorMode && !this.simpleShadingMode) {
-        if (value) {
-          this._applyOverlayBaseShading(rec);
-        } else {
-          this._restoreTileMaterial(rec);
-        }
-      }
     }
   }
 
@@ -408,7 +466,6 @@ class TileManager {
       visit(r);
     }
 
-    this.hudLOD.textContent = `τ=${SSE_THRESHOLD_REFINE.toFixed(1)}px / ${SSE_THRESHOLD_COARSEN.toFixed(1)}px`;
     return { want, replaceParents };
   }
 
@@ -603,15 +660,7 @@ class TileManager {
           }
         }
         this.tiles.set(id, rec);
-        if (this.tileColorMode) {
-          this._applyTileColor(rec);
-        } else if (this.simpleShadingMode) {
-          this._applySimpleShading(rec);
-        } else if (this.wireOverlayEnabled) {
-          this._applyOverlayBaseShading(rec);
-        } else {
-          this._restoreTileMaterial(rec);
-        }
+        this._applyActiveMaterial(rec);
         this._setWireOverlayVisible(rec.obj3d, this.wireOverlayEnabled);
         return;
       }
@@ -707,12 +756,23 @@ class TileManager {
 
         obj.traverse(o => {
           if (o.isMesh && o.material) {
-            const newMaterial = new THREE.MeshStandardMaterial({
-              vertexColors: true,
+            const geom = o.geometry;
+            const hasVertexColors = !!(geom && geom.attributes && geom.attributes.color);
+            if (geom && (!geom.attributes || !geom.attributes.normal)) {
+              geom.computeVertexNormals?.();
+            }
+            const baseColor = (o.material.color && o.material.color.isColor)
+              ? o.material.color.clone()
+              : new THREE.Color(0.85, 0.85, 0.85);
+            const newMaterial = new THREE.MeshPhongMaterial({
+              color: baseColor,
+              vertexColors: hasVertexColors,
               transparent: false,
               opacity: 1.0,
               wireframe: this.wireframeMode,
-              side: THREE.DoubleSide
+              side: THREE.DoubleSide,
+              shininess: 60,
+              specular: new THREE.Color(0.35, 0.35, 0.35)
             });
 
             if (o.material.map) {
@@ -723,23 +783,11 @@ class TileManager {
             o.userData.debugInfo = {
               originalMaterial: newMaterial,
               debugColor: pickDebugColor(),
-              originalColorAttr: o.geometry && o.geometry.attributes && o.geometry.attributes.color
-                ? o.geometry.attributes.color.clone()
+              originalColorAttr: hasVertexColors && geom?.attributes?.color
+                ? geom.attributes.color.clone()
                 : null,
               overrideMaterial: null
             };
-
-            if (!(o.geometry && o.geometry.attributes.color)) {
-              o.material = new THREE.MeshStandardMaterial({
-                color: pickDebugColor(),
-                vertexColors: false,
-                transparent: false,
-                opacity: 1.0,
-                wireframe: this.wireframeMode,
-                side: THREE.DoubleSide
-              });
-              o.userData.debugInfo.originalMaterial = o.material;
-            }
           }
         });
 
@@ -803,15 +851,7 @@ class TileManager {
       }
     }
 
-    if (this.tileColorMode) {
-      this._applyTileColor(rec);
-    } else if (this.simpleShadingMode) {
-      this._applySimpleShading(rec);
-    } else if (this.wireOverlayEnabled) {
-      this._applyOverlayBaseShading(rec);
-    } else {
-      this._restoreTileMaterial(rec);
-    }
+    this._applyActiveMaterial(rec);
     this._setWireOverlayVisible(rec.obj3d, this.wireOverlayEnabled);
 
     this.tiles.set(id, rec);
@@ -927,6 +967,16 @@ class TileManager {
     this.cacheBytes = Math.max(0, this.cacheBytes - bytes);
   }
 
+  _applyActiveMaterial(rec) {
+    if (this.tileColorMode) {
+      this._applyTileColor(rec);
+    } else if (this.wireOverlayEnabled) {
+      this._applyOverlayBaseShading(rec);
+    } else {
+      this._restoreTileMaterial(rec);
+    }
+  }
+
   _applyTileColor(rec) {
     rec.obj3d.traverse(obj => {
       if (obj.isMesh && obj.userData && obj.userData.debugInfo) {
@@ -943,36 +993,6 @@ class TileManager {
         if (geom && info.originalColorAttr) {
           geom.deleteAttribute('color');
         }
-      }
-    });
-  }
-
-  _applySimpleShading(rec) {
-    rec.obj3d.traverse(obj => {
-      if (obj.isMesh && obj.userData && obj.userData.debugInfo) {
-        const info = obj.userData.debugInfo;
-        if (!info.simpleMaterial) {
-          const hasVertexColors = !!(info.originalMaterial && info.originalMaterial.vertexColors);
-          const baseColor = info.originalMaterial && info.originalMaterial.color
-            ? info.originalMaterial.color.clone()
-            : new THREE.Color(0.8, 0.8, 0.8);
-          const specularColor = baseColor.clone().lerp(new THREE.Color(1, 1, 1), 0.5);
-          info.simpleMaterial = new THREE.MeshPhongMaterial({
-            color: baseColor,
-            vertexColors: hasVertexColors,
-            side: THREE.DoubleSide,
-            shininess: 60,
-            specular: specularColor
-          });
-        }
-        const geom = obj.geometry;
-        if (geom && !geom.attributes?.normal) {
-          geom.computeVertexNormals?.();
-          info.generatedNormals = true;
-        } else if (geom) {
-          info.generatedNormals = false;
-        }
-        obj.material = info.simpleMaterial;
       }
     });
   }
@@ -1009,10 +1029,6 @@ class TileManager {
             geom.setAttribute('color', restored);
           } else {
             geom.deleteAttribute('color');
-          }
-          if (info.generatedNormals) {
-            geom.deleteAttribute('normal');
-            info.generatedNormals = false;
           }
         }
       }
@@ -1120,8 +1136,28 @@ async function fetchPayloadJson(url) {
     return null;
   }
 }
-// Main application
-(async function main() {
+export async function initViewer(userConfig = {}) {
+  const configDatasets = normalizeConfigDatasets(userConfig?.datasets);
+  const datasetConfigMeta = new Map();
+  if (configDatasets) {
+    for (const ds of configDatasets) {
+      datasetConfigMeta.set(ds.name, ds);
+    }
+  }
+  const DEFAULT_EXTRACT_FALLBACK = 'dns-rough-2';
+  let defaultExtract = userConfig?.defaultExtract
+    ?? configDatasets?.[0]?.name
+    ?? DEFAULT_EXTRACT_FALLBACK;
+  if (configDatasets && configDatasets.length && !configDatasets.some(ds => ds.name === defaultExtract)) {
+    defaultExtract = configDatasets[0].name;
+  }
+  let defaultTimeValue = userConfig?.defaultTime;
+  if ((defaultTimeValue === undefined || defaultTimeValue === null) && defaultExtract && datasetConfigMeta.has(defaultExtract)) {
+    defaultTimeValue = datasetConfigMeta.get(defaultExtract).defaultTime;
+  }
+  if (defaultTimeValue === undefined || defaultTimeValue === null) {
+    defaultTimeValue = configDatasets?.[0]?.defaultTime ?? 0;
+  }
   // Setup renderer
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -1153,45 +1189,61 @@ async function fetchPayloadJson(url) {
   cameraLight.position.set(0, 0, 1);
   camera.add(cameraLight);
 
-  const DEFAULT_EXTRACT = 'dns-rough-2';
+  const DEFAULT_EXTRACT = defaultExtract || DEFAULT_EXTRACT_FALLBACK;
+  const DEFAULT_TIME_STRING = String(defaultTimeValue ?? 0);
+  const DISPLAY_MODES = {
+    SHADED: 'shaded',
+    WIREFRAME: 'wireframe',
+    TILE_COLOURS: 'tileColors',
+    WIRE_OVERLAY: 'wireOverlay'
+  };
+  const DISPLAY_MODE_OPTIONS = {
+    'Shaded (Phong)': DISPLAY_MODES.SHADED,
+    'Wireframe': DISPLAY_MODES.WIREFRAME,
+    'Tile Colours': DISPLAY_MODES.TILE_COLOURS,
+    'Wireframe Overlay': DISPLAY_MODES.WIRE_OVERLAY
+  };
 
   const settings = {
     extract: DEFAULT_EXTRACT,
-    time: '0',
+    time: DEFAULT_TIME_STRING,
     sseRefine: SSE_THRESHOLD_REFINE,
     preserveCameraView: false,
-    wireframe: false,
     boundingBoxes: true,
-    tileColorMode: false,
-    simpleShading: true,
-    wireframeOverlay: false,
+    displayMode: DISPLAY_MODES.SHADED,
     wireframeOverlayOpacity: 1.0,
     showAxes: false,
-    staticReuse: true
   };
 
   mgr.showBoundingBoxes = settings.boundingBoxes;
-  mgr.simpleShadingMode = settings.simpleShading;
+  mgr.displayMode = settings.displayMode;
   mgr.wireOverlayOpacity = settings.wireframeOverlayOpacity;
-  mgr.applyWireOverlayState(settings.wireframeOverlay);
-  mgr.staticReuseDisabled = !settings.staticReuse;
   const axesHelper = new THREE.AxesHelper(0.5);
   axesHelper.visible = settings.showAxes;
   scene.add(axesHelper);
 
   const gui = new GUI({ width: 300 });
-  const datasetFolder = gui.addFolder('Dataset');
+  let datasetFolder = null;
+  function ensureDatasetFolder() {
+    if (!datasetFolder) {
+      datasetFolder = gui.addFolder('Dataset');
+    }
+    datasetFolder.domElement.style.display = '';
+    return datasetFolder;
+  }
+  function hideDatasetFolder() {
+    if (datasetFolder) {
+      datasetFolder.domElement.style.display = 'none';
+    }
+  }
   const lodFolder = gui.addFolder('LOD');
   const diagnosticsFolder = gui.addFolder('Diagnostics');
 
   let extractController = null;
   let timeController = null;
-  let tileColorController = null;
-  let simpleShadingController = null;
+  let displayModeController = null;
   let sseRefineController = null;
   let preserveCameraController = null;
-  let suppressTileColorHandler = false;
-  let suppressSimpleShadingHandler = false;
   let suppressSseHandler = false;
   let userAdjustedSSE = false;
   let timeIsSlider = false;
@@ -1203,6 +1255,7 @@ async function fetchPayloadJson(url) {
   let currentDatasetHasMultipleTimes = false;
   let autoEnabledPreserveCamera = false;
   let suppressPreserveHandler = false;
+  let hasMultipleExtracts = false;
 
   function applyWireframe(wireframe) {
     const apply = (obj) => {
@@ -1226,74 +1279,69 @@ async function fetchPayloadJson(url) {
     }
   }
 
-  function applyTileColorState(value) {
-    settings.tileColorMode = value;
-    mgr.tileColorMode = value;
+  function applyDisplayMode(mode) {
+    if (!Object.values(DISPLAY_MODES).includes(mode)) {
+      mode = DISPLAY_MODES.SHADED;
+    }
+    settings.displayMode = mode;
+    mgr.displayMode = mode;
+    mgr.tileColorMode = (mode === DISPLAY_MODES.TILE_COLOURS);
 
-    if (value) {
-      for (const [, rec] of mgr.tiles) {
+    const wantWireframe = (mode === DISPLAY_MODES.WIREFRAME);
+    mgr.wireframeMode = wantWireframe;
+    applyWireframe(wantWireframe);
+
+    const wantOverlay = (mode === DISPLAY_MODES.WIRE_OVERLAY);
+    mgr.applyWireOverlayState(wantOverlay);
+
+    const applyState = (rec) => {
+      if (mgr.tileColorMode) {
         mgr._applyTileColor(rec);
+      } else if (wantOverlay) {
+        mgr._applyOverlayBaseShading(rec);
+      } else {
+        mgr._restoreTileMaterial(rec);
       }
-      for (const [id, rec] of mgr.cache) {
-        if (mgr.tiles.has(id)) continue;
-        mgr._applyTileColor(rec);
-      }
-    } else {
-      for (const [, rec] of mgr.tiles) {
-        if (mgr.simpleShadingMode) {
-          mgr._applySimpleShading(rec);
-        } else if (mgr.wireOverlayEnabled) {
-          mgr._applyOverlayBaseShading(rec);
-        } else {
-          mgr._restoreTileMaterial(rec);
-        }
-      }
-      for (const [id, rec] of mgr.cache) {
-        if (mgr.tiles.has(id)) continue;
-        if (mgr.simpleShadingMode) {
-          mgr._applySimpleShading(rec);
-        } else if (mgr.wireOverlayEnabled) {
-          mgr._applyOverlayBaseShading(rec);
-        } else {
-          mgr._restoreTileMaterial(rec);
-        }
-      }
+    };
+
+    for (const [, rec] of mgr.tiles) {
+      applyState(rec);
+    }
+    for (const [id, rec] of mgr.cache) {
+      if (mgr.tiles.has(id)) continue;
+      applyState(rec);
     }
   }
 
-  function applySimpleShadingState(value) {
-    settings.simpleShading = value;
-    mgr.simpleShadingMode = value;
-
-    if (value) {
-      for (const [, rec] of mgr.tiles) {
-        mgr._applySimpleShading(rec);
-      }
-      for (const [id, rec] of mgr.cache) {
-        if (mgr.tiles.has(id)) continue;
-        mgr._applySimpleShading(rec);
-      }
-    } else {
-      for (const [, rec] of mgr.tiles) {
-        if (mgr.tileColorMode) {
-          mgr._applyTileColor(rec);
-        } else if (mgr.wireOverlayEnabled) {
-          mgr._applyOverlayBaseShading(rec);
-        } else {
-          mgr._restoreTileMaterial(rec);
-        }
-      }
-      for (const [id, rec] of mgr.cache) {
-        if (mgr.tiles.has(id)) continue;
-        if (mgr.tileColorMode) {
-          mgr._applyTileColor(rec);
-        } else if (mgr.wireOverlayEnabled) {
-          mgr._applyOverlayBaseShading(rec);
-        } else {
-          mgr._restoreTileMaterial(rec);
-        }
-      }
+  function resolveManifestTargets(extractName, timeValue) {
+    const t = Number(timeValue);
+    const descriptor = datasetConfigMeta.get(extractName);
+    if (!descriptor) {
+      return {
+        manifestUrl: `/manifest/${extractName}/${t}.json`,
+        payloadUrl: `/payload/${extractName}/${t}.json`,
+        tilesBaseOverride: null,
+      };
     }
+    const entry = descriptor.manifestEntries.get(t);
+    const manifestUrl = (entry && entry.manifestUrl)
+      ? entry.manifestUrl
+      : (descriptor.manifestPattern
+        ? resolveAbsoluteUrl(formatPattern(descriptor.manifestPattern, extractName, t))
+        : `/manifest/${extractName}/${t}.json`);
+    let payloadUrl;
+    if (entry && Object.prototype.hasOwnProperty.call(entry, 'payloadUrl')) {
+      payloadUrl = entry.payloadUrl;
+    } else if (descriptor.payloadPattern) {
+      payloadUrl = resolveAbsoluteUrl(formatPattern(descriptor.payloadPattern, extractName, t));
+    } else {
+      payloadUrl = `/payload/${extractName}/${t}.json`;
+    }
+    return {
+      manifestUrl,
+      payloadUrl,
+      tilesBaseOverride: descriptor.tilesBasePath || null,
+    };
   }
 
   function calibrateSSEThreshold() {
@@ -1335,15 +1383,26 @@ async function fetchPayloadJson(url) {
 
   function rebuildExtractController() {
     if (extractController) {
-      datasetFolder.remove(extractController);
+      if (datasetFolder) {
+        datasetFolder.remove(extractController);
+      } else {
+        gui.remove(extractController);
+      }
     }
 
     const names = extractsCache.length ? extractsCache.map(e => e.name) : [DEFAULT_EXTRACT];
+    const showExtractDropdown = hasMultipleExtracts && names.length > 1;
     if (!names.includes(settings.extract)) {
       settings.extract = names[0];
     }
 
-    extractController = datasetFolder.add(settings, 'extract', names);
+    if (!showExtractDropdown) {
+      extractController = null;
+      return;
+    }
+
+    const folder = ensureDatasetFolder();
+    extractController = folder.add(settings, 'extract', names);
     extractController.name('Extract');
     extractController.onChange((value) => {
       settings.extract = value;
@@ -1355,7 +1414,11 @@ async function fetchPayloadJson(url) {
 
   function rebuildTimeController() {
     if (timeController) {
-      datasetFolder.remove(timeController);
+      if (timeController.__useDatasetFolder && datasetFolder) {
+        datasetFolder.remove(timeController);
+      } else {
+        gui.remove(timeController);
+      }
       timeController = null;
     }
 
@@ -1375,11 +1438,14 @@ async function fetchPayloadJson(url) {
 
     const useSlider = times.length <= 100;
     timeIsSlider = useSlider;
+    const attachToFolder = hasMultipleExtracts;
+    const targetFolder = attachToFolder ? ensureDatasetFolder() : gui;
     if (useSlider) {
       const min = Math.min(...times);
       const max = Math.max(...times);
       settings.timeIndex = Number(settings.time);
-      timeController = datasetFolder.add(settings, 'timeIndex', min, max, 1).name('Time');
+      timeController = targetFolder.add(settings, 'timeIndex', min, max, 1).name('Time');
+      timeController.__useDatasetFolder = attachToFolder;
       timeController.onChange((value) => {
         const rounded = Math.round(value);
         const clamped = Math.min(Math.max(rounded, min), max);
@@ -1396,7 +1462,8 @@ async function fetchPayloadJson(url) {
       timeController.updateDisplay?.();
     } else {
       const timeStrings = times.map(t => t.toString());
-      timeController = datasetFolder.add(settings, 'time', timeStrings).name('Time');
+      timeController = targetFolder.add(settings, 'time', timeStrings).name('Time');
+      timeController.__useDatasetFolder = attachToFolder;
       timeController.onChange((value) => {
         const manifestKey = `${settings.extract}:${value}`;
         if (currentManifestKey === manifestKey) {
@@ -1446,13 +1513,15 @@ async function fetchPayloadJson(url) {
   }
 
   async function loadManifest() {
-    const manifestUrl = `/manifest/${settings.extract}/${settings.time}.json`;
-    const payloadUrl = `/payload/${settings.extract}/${settings.time}.json`;
+    const manifestTargets = resolveManifestTargets(settings.extract, settings.time);
+    const manifestUrl = manifestTargets.manifestUrl;
+    const payloadUrl = manifestTargets.payloadUrl;
+    const tileBaseOverride = manifestTargets.tilesBaseOverride;
     const extractChanged = currentExtract !== settings.extract;
     prefetchedTileBuffers.clear();
     let manifest = null;
     const datasetKey = settings.extract;
-    const canUsePayload = !extractChanged
+    const canUsePayload = !!payloadUrl && !extractChanged
       && !mgr.staticReuseDisabled
       && mgr.staticLayoutActive
       && mgr.datasetKey === datasetKey
@@ -1491,8 +1560,7 @@ async function fetchPayloadJson(url) {
       }
     }
     mgr.showBoundingBoxes = settings.boundingBoxes;
-    mgr.simpleShadingMode = settings.simpleShading;
-    mgr.wireframeMode = settings.wireframe;
+    mgr.wireframeMode = (settings.displayMode === DISPLAY_MODES.WIREFRAME);
     const manifestLayout = manifest?.layout?.type || null;
     const manifestTime = manifest?.time != null ? manifest.time : settings.time;
     const wantsStatic = (manifestLayout === "static-octree");
@@ -1507,7 +1575,8 @@ async function fetchPayloadJson(url) {
     await mgr.init(manifestUrl, manifest, {
       datasetKey,
       timeIndex: manifestTime,
-      reuseTiles: canReuse
+      reuseTiles: canReuse,
+      tileBaseOverride,
     });
     if (!settings.preserveCameraView || !hasLoadedDataset) {
       recenterCamera();
@@ -1537,30 +1606,59 @@ async function fetchPayloadJson(url) {
       SSE_THRESHOLD_COARSEN = Math.max(0.05, settings.sseRefine * 0.5);
       sseRefineController?.updateDisplay?.();
     }
-    applyWireframe(settings.wireframe);
     mgr.updateBoundingBoxVisibility();
     await mgr.tick();
-    if (settings.simpleShading) {
-      applySimpleShadingState(true);
-    }
+    applyDisplayMode(settings.displayMode);
     currentManifestKey = `${settings.extract}:${settings.time}`;
   }
 
   async function loadExtractsList() {
+    if (configDatasets && configDatasets.length) {
+      extractsCache = configDatasets.map(ds => ({
+        name: ds.name,
+        label: ds.label,
+        times: ds.times,
+      }));
+      hasMultipleExtracts = extractsCache.length > 1;
+      if (!extractsCache.some(e => e.name === settings.extract)) {
+        settings.extract = extractsCache[0].name;
+        const meta = datasetConfigMeta.get(settings.extract);
+        const fallbackTime = meta?.defaultTime ?? meta?.times?.[0] ?? 0;
+        settings.time = String(fallbackTime);
+      }
+      rebuildExtractController();
+      rebuildTimeController();
+      refreshPreserveCameraController();
+      if (hasMultipleExtracts) {
+        ensureDatasetFolder().open();
+      } else {
+        hideDatasetFolder();
+      }
+      await loadManifest();
+      return;
+    }
     try {
       const response = await fetch('/api/extracts');
       extractsCache = await response.json();
+      hasMultipleExtracts = extractsCache.length > 1;
       rebuildExtractController();
       rebuildTimeController();
-      datasetFolder.open();
+      refreshPreserveCameraController();
+      if (hasMultipleExtracts) {
+        ensureDatasetFolder().open();
+      } else {
+        hideDatasetFolder();
+      }
       await loadManifest();
     } catch (err) {
       console.error('Failed to load extracts list:', err);
       extractsCache = [];
+      hasMultipleExtracts = false;
       settings.extract = DEFAULT_EXTRACT;
-      settings.time = '0';
+      settings.time = DEFAULT_TIME_STRING;
       rebuildExtractController();
       rebuildTimeController();
+      refreshPreserveCameraController();
       await loadManifest();
     }
   }
@@ -1576,13 +1674,6 @@ async function fetchPayloadJson(url) {
     mgr.tick();
   });
 
-  diagnosticsFolder.add(settings, 'wireframe').name('Wireframe').onChange((value) => {
-    settings.wireframe = value;
-    mgr.wireframeMode = value;
-    applyWireframe(value);
-    mgr.tick();
-  });
-
   diagnosticsFolder.add(settings, 'boundingBoxes').name('Bounding Boxes').onChange((value) => {
     settings.boundingBoxes = value;
     mgr.showBoundingBoxes = value;
@@ -1594,50 +1685,8 @@ async function fetchPayloadJson(url) {
     axesHelper.visible = value;
   });
 
-  diagnosticsFolder.add(settings, 'staticReuse').name('Static layout reuse').onChange((value) => {
-    settings.staticReuse = value;
-    mgr.staticReuseDisabled = !value;
-  });
-
-  tileColorController = diagnosticsFolder.add(settings, 'tileColorMode').name('Tile Colours').onChange((value) => {
-    if (suppressTileColorHandler) {
-      settings.tileColorMode = value;
-      return;
-    }
-
-    if (value && settings.simpleShading) {
-      if (simpleShadingController) {
-        suppressSimpleShadingHandler = true;
-        simpleShadingController.setValue(false);
-        suppressSimpleShadingHandler = false;
-      }
-      applySimpleShadingState(false);
-    }
-
-    applyTileColorState(value);
-  });
-
-  simpleShadingController = diagnosticsFolder.add(settings, 'simpleShading').name('Simple Shading').onChange((value) => {
-    if (suppressSimpleShadingHandler) {
-      settings.simpleShading = value;
-      return;
-    }
-
-    if (value && settings.tileColorMode) {
-      if (tileColorController) {
-        suppressTileColorHandler = true;
-        tileColorController.setValue(false);
-        suppressTileColorHandler = false;
-      }
-      applyTileColorState(false);
-    }
-
-    applySimpleShadingState(value);
-  });
-
-  diagnosticsFolder.add(settings, 'wireframeOverlay').name('Wireframe overlay').onChange((value) => {
-    settings.wireframeOverlay = value;
-    mgr.applyWireOverlayState(value);
+  displayModeController = diagnosticsFolder.add(settings, 'displayMode', DISPLAY_MODE_OPTIONS).name('Display mode').onChange((value) => {
+    applyDisplayMode(value);
     mgr.tick();
   });
 
@@ -1645,15 +1694,26 @@ async function fetchPayloadJson(url) {
   diagnosticsFolder.open();
   lodFolder.open();
 
-  preserveCameraController = datasetFolder.add(settings, 'preserveCameraView').name('Preserve camera view').onChange((value) => {
-    settings.preserveCameraView = value;
-    if (!suppressPreserveHandler) {
-      userToggledPreserveCamera = true;
+  function refreshPreserveCameraController() {
+    if (preserveCameraController) {
+      datasetFolder.remove(preserveCameraController);
+      preserveCameraController = null;
     }
-    if (!value) {
-      autoEnabledPreserveCamera = false;
+    if (!hasMultipleExtracts) {
+      settings.preserveCameraView = false;
+      return;
     }
-  });
+    const folder = ensureDatasetFolder();
+    preserveCameraController = folder.add(settings, 'preserveCameraView').name('Preserve camera view').onChange((value) => {
+      settings.preserveCameraView = value;
+      if (!suppressPreserveHandler) {
+        userToggledPreserveCamera = true;
+      }
+      if (!value) {
+        autoEnabledPreserveCamera = false;
+      }
+    });
+  }
 
   // Update on controls change
   controls.addEventListener('change', () => mgr.tick());
@@ -1675,4 +1735,6 @@ async function fetchPayloadJson(url) {
 
   // Initialize
   await loadExtractsList();
-})();
+}
+
+export default initViewer;
