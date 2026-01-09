@@ -1,6 +1,6 @@
 {
   "name": "extract-tiles",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Multi-resolution extract-tiling system for triangulated mesh surfaces",
   "type": "module",
   "main": "server.mjs",
