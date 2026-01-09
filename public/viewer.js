@@ -92,6 +92,17 @@ function ensureTrailingSlash(url) {
   return url.endsWith("/") ? url : `${url}/`;
 }
 
+function parseVector3(arr) {
+  if (!Array.isArray(arr) || arr.length !== 3) {
+    return null;
+  }
+  const [x, y, z] = arr.map(Number);
+  if ([x, y, z].some((v) => !Number.isFinite(v))) {
+    return null;
+  }
+  return [x, y, z];
+}
+
 function formatPattern(pattern, extract, time) {
   return pattern
     .replace(/\{extract\}/g, extract)
@@ -1138,6 +1149,11 @@ async function fetchPayloadJson(url) {
 }
 export async function initViewer(userConfig = {}) {
   const configDatasets = normalizeConfigDatasets(userConfig?.datasets);
+  const configDefaultSse = Number(userConfig?.defaultSseRefine);
+  if (Number.isFinite(configDefaultSse) && configDefaultSse > 0) {
+    SSE_THRESHOLD_REFINE = configDefaultSse;
+    SSE_THRESHOLD_COARSEN = Math.max(0.05, configDefaultSse * 0.5);
+  }
   const datasetConfigMeta = new Map();
   if (configDatasets) {
     for (const ds of configDatasets) {
@@ -1158,6 +1174,7 @@ export async function initViewer(userConfig = {}) {
   if (defaultTimeValue === undefined || defaultTimeValue === null) {
     defaultTimeValue = configDatasets?.[0]?.defaultTime ?? 0;
   }
+  const CAMERA_DISTANCE_MULTIPLIER = 2.0;
   // Setup renderer
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -1181,6 +1198,7 @@ export async function initViewer(userConfig = {}) {
 
   // Setup controls
   const controls = new OrbitControls(camera, renderer.domElement);
+  controls.update();
   const mgr = new TileManager(scene, camera, renderer);
 
   // Setup lighting - ambient fill plus camera-attached key light for lambert shading
@@ -1256,6 +1274,7 @@ export async function initViewer(userConfig = {}) {
   let autoEnabledPreserveCamera = false;
   let suppressPreserveHandler = false;
   let hasMultipleExtracts = false;
+  let skipInitialRecenter = false;
 
   function applyWireframe(wireframe) {
     const apply = (obj) => {
@@ -1502,8 +1521,9 @@ export async function initViewer(userConfig = {}) {
 
     const center = bbox.getCenter(new THREE.Vector3());
     const size = bbox.getSize(new THREE.Vector3());
-    const radius = Math.max(size.length() * 0.5, 0.5);
-    const distance = Math.max(radius * 2.5, 1.0);
+    const radius = Math.max(size.length() * 0.5, 0.05);
+    const baseDistance = radius * CAMERA_DISTANCE_MULTIPLIER;
+    const distance = Math.max(baseDistance, 0.05);
     const direction = new THREE.Vector3(0, 0, 1);
 
     camera.position.copy(center.clone().add(direction.multiplyScalar(distance)));
@@ -1578,7 +1598,12 @@ export async function initViewer(userConfig = {}) {
       reuseTiles: canReuse,
       tileBaseOverride,
     });
-    if (!settings.preserveCameraView || !hasLoadedDataset) {
+    let shouldRecenter = (!settings.preserveCameraView || !hasLoadedDataset);
+    if (skipInitialRecenter && !hasLoadedDataset) {
+      shouldRecenter = false;
+      skipInitialRecenter = false;
+    }
+    if (shouldRecenter) {
       recenterCamera();
     }
     if (!hasLoadedDataset) {

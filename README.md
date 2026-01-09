@@ -221,11 +221,12 @@ If you want to host the viewer from a plain static server (no Fastify, no `/api/
     }
   ],
   "defaultExtract": "cylinders_world_2",
-  "defaultTime": 0
+  "defaultTime": 0,
+  "defaultSseRefine": 25
 }
 ```
 
-Then update `public/index.html` to fetch that config on startup (see inline comments in the file). In this mode the viewer never calls `/api/extracts`—it just loads the manifests/payloads referenced in the config and points tiles at the static `tilesBasePath`.
+Top-level fields such as `defaultSseRefine` (pixels) let you customise the initial SSE threshold without touching the code. Then update `public/index.html` to fetch that config on startup (see inline comments in the file). In this mode the viewer never calls `/api/extracts`—it just loads the manifests/payloads referenced in the config and points tiles at the static `tilesBasePath`.
 
 ### 3. View the Tiles
 
