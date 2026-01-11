@@ -18,6 +18,7 @@ const TILE_DEBUG_COLORS = [
   0xedc948, 0xb6992d, 0xb07aa1, 0xd4a6c8, 0xff9da7,
   0x9c755f, 0xd7b5a6, 0xbab0ac, 0xd1d1d1, 0x7f7f7f
 ];
+const REPO_URL = "https://github.com/grahampullan/extract-tiles";
 
 function pickDebugColor() {
   const idx = Math.floor(Math.random() * TILE_DEBUG_COLORS.length);
@@ -1181,6 +1182,23 @@ export async function initViewer(userConfig = {}) {
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setClearColor(0xe0e0e0, 1);
   document.getElementById('app').appendChild(renderer.domElement);
+  const hudContainer = document.getElementById('hud');
+  if (hudContainer && !hudContainer.querySelector('.repo-link')) {
+    const link = document.createElement('a');
+    link.href = REPO_URL;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "Extract-Tiles GitHub";
+    link.className = "repo-link";
+    link.style.marginLeft = "8px";
+    link.style.color = "#9ad8ff";
+    link.style.textDecoration = "none";
+    const sep = document.createElement('span');
+    sep.textContent = "|";
+    sep.style.margin = "0 6px";
+    hudContainer.appendChild(sep);
+    hudContainer.appendChild(link);
+  }
 
   // Setup scene
   const scene = new THREE.Scene();
