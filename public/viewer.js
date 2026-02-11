@@ -1180,7 +1180,8 @@ export async function initViewer(userConfig = {}) {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setClearColor(0xe0e0e0, 1);
+  const defaultBackColor = userConfig?.defaultBackground || 0xe0e0e0;
+  renderer.setClearColor(defaultBackColor, 1);
   document.getElementById('app').appendChild(renderer.domElement);
   const hudContainer = document.getElementById('hud');
   if (hudContainer && !hudContainer.querySelector('.repo-link')) {
@@ -1202,7 +1203,7 @@ export async function initViewer(userConfig = {}) {
 
   // Setup scene
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xe0e0e0); 
+  scene.background = new THREE.Color(defaultBackColor);
 
   // Setup camera
   const camera = new THREE.PerspectiveCamera(
